@@ -12,3 +12,16 @@ serde_json = "1.0.69"
 rusqlite = "0.26.1"
 anyhow = "1.0.45"
 dotenv = "0.15.0"
+tiny-bip39 = "0.8"
+
+[dependencies.zcash_client_backend]
+git = "https://github.com/zcash/librustzcash.git"
+rev = "35023ed8ca2fb1061e78fd740b640d4eefcc5edd"
+
+[dependencies.zcash_primitives]
+git = "https://github.com/zcash/librustzcash.git"
+rev = "35023ed8ca2fb1061e78fd740b640d4eefcc5edd"
+
+[dependencies.zcash_proofs]
+git = "https://github.com/zcash/librustzcash.git"
+rev = "35023ed8ca2fb1061e78fd740b640d4eefcc5edd"

@@ -1,2 +1,6 @@
 /target
 .idea/
+gen.sh
+rpc.tpl
+.env
+*.db
