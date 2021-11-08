@@ -1,9 +1,9 @@
 use rocket::serde::{Serialize, Deserialize, json::Json};
-use crate::account::{derive_account, SubAccount};
+use crate::account::AccountBalance;
 use rocket::response::Debug;
-use anyhow::Context;
 use rocket::State;
 use crate::db::Db;
+use crate::transaction::Transfer;
 
 #[derive(Serialize, Deserialize)]
 pub struct CreateAccountRequest {
@@ -19,12 +19,11 @@ pub struct CreateAccountResponse {
 #[post("/create_account", data = "<request>")]
 pub fn create_account(request: Json<CreateAccountRequest>, db: &State<Db>) -> Result<Json<CreateAccountResponse>, Debug<anyhow::Error>> {
     let request = request.into_inner();
-    let seed = dotenv::var("SEED").context("Seed missing from .env file")?;
     let name = request.label.unwrap_or("".to_string());
 
-    let account = db.derive_account(&name, &seed)?;
+    let account = db.new_account(&name)?;
     let rep = CreateAccountResponse {
-        account_index: account.id,
+        account_index: account.account_index,
         address: account.address,
     };
 
@@ -39,18 +38,18 @@ pub struct CreateAddressRequest {
 #[derive(Serialize, Deserialize)]
 pub struct CreateAddressResponse {
     address: String,
-    address_index: i64,
+    address_index: u32,
 }
 
 #[post("/create_address", data = "<request>")]
 pub fn create_address(request: Json<CreateAddressRequest>, db: &State<Db>) -> Result<Json<CreateAddressResponse>, Debug<anyhow::Error>> {
     let request = request.into_inner();
     let name = request.label.unwrap_or("".to_string());
-    let diversified_address = db.new_diversified_address(request.account_index, &name)?;
+    let sub_account = db.new_sub_account(request.account_index, &name)?;
 
     let rep = CreateAddressResponse {
-        address: diversified_address.address.clone(),
-        address_index: diversified_address.index,
+        address: sub_account.address.clone(),
+        address_index: sub_account.sub_account_index,
     };
     Ok(Json(rep))
 }
@@ -61,7 +60,7 @@ pub struct GetAccountsRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct GetAccountsResponse {
-    subaddress_accounts: Vec<SubAccount>,
+    subaddress_accounts: Vec<AccountBalance>,
     total_balance: u64,
     total_unlocked_balance: u64,
 }
@@ -83,15 +82,21 @@ pub fn get_accounts(request: Json<GetAccountsRequest>, db: &State<Db>) -> Result
 }
 #[derive(Serialize, Deserialize)]
 pub struct GetTransactionByIdRequest {
+    pub txid: String,
+    pub account_index: u32,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct GetTransactionByIdResponse {
+    pub transfer: Transfer,
+    pub transfers: Vec<Transfer>,
 }
 
 #[post("/get_transaction", data = "<request>")]
 pub fn get_transaction(request: Json<GetTransactionByIdRequest>) -> Json<GetTransactionByIdResponse> {
     let rep = GetTransactionByIdResponse {
+        transfer: Transfer::default(),
+        transfers: vec![],
     };
     Json(rep)
 }
