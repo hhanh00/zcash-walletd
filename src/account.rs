@@ -11,6 +11,11 @@ pub struct Account {
     pub address: String,
 }
 
+pub struct DiversifiedAddress {
+    pub address: String,
+    pub index: i64,
+}
+
 pub fn derive_account(phrase: &str, account_index: u32) -> anyhow::Result<Account> {
     let mnemonic = Mnemonic::from_phrase(&phrase, Language::English)?;
     let seed = Seed::new(&mnemonic, "");

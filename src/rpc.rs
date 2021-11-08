@@ -33,17 +33,27 @@ pub fn create_account(request: Json<CreateAccountRequest>, db: &State<Db>) -> Re
 }
 #[derive(Serialize, Deserialize)]
 pub struct CreateAddressRequest {
+    account_index: u32,
+    label: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct CreateAddressResponse {
+    address: String,
+    address_index: i64,
 }
 
 #[post("/create_address", data = "<request>")]
-pub fn create_address(request: Json<CreateAddressRequest>) -> Json<CreateAddressResponse> {
+pub fn create_address(request: Json<CreateAddressRequest>, db: &State<Db>) -> Result<Json<CreateAddressResponse>, Debug<anyhow::Error>> {
+    let request = request.into_inner();
+    let name = request.label.unwrap_or("".to_string());
+    let diversified_address = db.new_diversified_address(request.account_index, &name)?;
+
     let rep = CreateAddressResponse {
+        address: diversified_address.address.clone(),
+        address_index: diversified_address.index,
     };
-    Json(rep)
+    Ok(Json(rep))
 }
 #[derive(Serialize, Deserialize)]
 pub struct GetAccountRequest {
