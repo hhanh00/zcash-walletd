@@ -1,3 +1,4 @@
+use rocket::serde::{Serialize, Deserialize};
 use bip39::{Seed, Mnemonic, Language};
 use zcash_primitives::zip32::{ExtendedSpendingKey, ExtendedFullViewingKey, ChildIndex};
 use zcash_client_backend::encoding::{encode_extended_spending_key, encode_extended_full_viewing_key, encode_payment_address};
@@ -9,6 +10,16 @@ pub struct Account {
     pub esk: String,
     pub efvk: String,
     pub address: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SubAccount {
+    pub account_index: u32,
+    pub balance: u64,
+    pub base_address: String,
+    pub label: String,
+    pub tag: String,
+    pub unlocked_balance: u64,
 }
 
 pub struct DiversifiedAddress {

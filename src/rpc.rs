@@ -1,5 +1,5 @@
 use rocket::serde::{Serialize, Deserialize, json::Json};
-use crate::account::derive_account;
+use crate::account::{derive_account, SubAccount};
 use rocket::response::Debug;
 use anyhow::Context;
 use rocket::State;
@@ -28,7 +28,6 @@ pub fn create_account(request: Json<CreateAccountRequest>, db: &State<Db>) -> Re
         address: account.address,
     };
 
-
     Ok(Json(rep))
 }
 #[derive(Serialize, Deserialize)]
@@ -56,24 +55,29 @@ pub fn create_address(request: Json<CreateAddressRequest>, db: &State<Db>) -> Re
     Ok(Json(rep))
 }
 #[derive(Serialize, Deserialize)]
-pub struct GetAccountRequest {
+pub struct GetAccountsRequest {
+    tag: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GetAccountResponse {
-    account_index: u32,
-    address: String,
+pub struct GetAccountsResponse {
+    subaddress_accounts: Vec<SubAccount>,
+    total_balance: u64,
+    total_unlocked_balance: u64,
 }
 
-#[post("/get_account", data = "<_request>")]
-pub fn get_account(_request: Json<GetAccountRequest>) -> Result<Json<GetAccountResponse>, Debug<anyhow::Error>> {
-    let seed = dotenv::var("SEED").context("Seed missing from .env file")?;
-    let account_index = 0; // TODO
+#[post("/get_accounts", data = "<request>")]
+pub fn get_accounts(request: Json<GetAccountsRequest>, db: &State<Db>) -> Result<Json<GetAccountsResponse>, Debug<anyhow::Error>> {
+    let request = request.into_inner();
 
-    let keys = derive_account(&seed, account_index)?;
-    let rep = GetAccountResponse {
-        account_index,
-        address: keys.address,
+    let sub_accounts = db.get_accounts()?;
+    let total_balance: u64 = sub_accounts.iter().map(|sa| sa.balance).sum();
+    let total_unlocked_balance: u64 = sub_accounts.iter().map(|sa| sa.unlocked_balance).sum();
+
+    let rep = GetAccountsResponse {
+        subaddress_accounts: sub_accounts,
+        total_balance,
+        total_unlocked_balance,
     };
     Ok(Json(rep))
 }

@@ -20,7 +20,7 @@ fn rocket() -> _ {
     rocket::build()
         .manage(db)
         .mount("/", routes![
-        create_account, create_address, get_account,
+        create_account, create_address, get_accounts,
         get_transaction, make_payment,
     ])
 }

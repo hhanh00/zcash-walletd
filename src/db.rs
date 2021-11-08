@@ -1,5 +1,5 @@
 use rusqlite::{Connection, params, OptionalExtension};
-use crate::account::{Account, derive_account, DiversifiedAddress};
+use crate::account::{Account, derive_account, DiversifiedAddress, SubAccount};
 use std::sync::{Mutex, MutexGuard};
 use zcash_client_backend::encoding::{decode_extended_full_viewing_key, encode_payment_address};
 use crate::NETWORK;
@@ -27,6 +27,8 @@ impl Db {
         let account = derive_account(seed, account_id)?;
         connection.execute("UPDATE accounts SET sk=?1, ivk=?2, address=?3 WHERE id_account=?4",
                            params![&account.esk, &account.efvk, &account.address, account_id])?;
+        connection.execute("INSERT INTO balances(account, total, unlocked) VALUES (?1,0,0)",
+                           params![account_id])?;
         Ok(account)
     }
 
@@ -61,6 +63,35 @@ impl Db {
         Ok(address)
     }
 
+    pub fn get_accounts(&self) -> anyhow::Result<Vec<SubAccount>> {
+        let connection = self.grab_lock();
+
+        let mut s = connection.prepare("SELECT id_account, total, address, name, unlocked FROM accounts a JOIN balances b ON a.id_account = b.account")?;
+        let rows = s.query_map([], |row| {
+            let id_account: u32 = row.get(0)?;
+            let total: u64 = row.get(1)?;
+            let address: String = row.get(2)?;
+            let name: String = row.get(3)?;
+            let unlocked: u64 = row.get(4)?;
+            Ok(SubAccount {
+                account_index: id_account,
+                balance: total,
+                base_address: address.clone(),
+                label: name.clone(),
+                tag: "".to_string(),
+                unlocked_balance: unlocked,
+            })
+        })?;
+
+        let mut sub_accounts: Vec<SubAccount> = vec![];
+        for row in rows {
+            let sa = row?;
+            sub_accounts.push(sa);
+        }
+
+        Ok(sub_accounts)
+    }
+
     pub fn create(&self) -> anyhow::Result<()> {
         let connection = self.grab_lock();
         connection.execute(
@@ -70,6 +101,14 @@ impl Db {
             sk TEXT NOT NULL,
             ivk TEXT NOT NULL,
             address TEXT NOT NULL)",
+            [],
+        )?;
+
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS balances (
+            account INTEGER PRIMARY KEY,
+            total INTEGER NOT NULL,
+            unlocked INTEGER NOT NULL)",
             [],
         )?;
 
