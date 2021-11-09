@@ -6,12 +6,12 @@ use zcash_primitives::transaction::components::sapling::CompactOutputDescription
 use crate::NETWORK;
 use zcash_primitives::sapling::note_encryption::{try_sapling_compact_note_decryption, try_sapling_note_decryption};
 use zcash_primitives::consensus::{BlockHeight, Parameters};
-use zcash_primitives::sapling::{SaplingIvk, Node, ViewingKey, Nullifier};
+use zcash_primitives::sapling::{SaplingIvk, Node, ViewingKey};
 use group::GroupEncoding;
 use ff::PrimeField;
 use zcash_primitives::merkle_tree::CommitmentTree;
 use zcash_client_backend::encoding::encode_payment_address;
-use tokio::sync::mpsc::{Sender, Receiver, channel};
+use tokio::sync::mpsc::{Sender, channel};
 use zcash_primitives::transaction::{TxId, Transaction};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
@@ -19,17 +19,6 @@ use tonic::transport::Channel;
 use zcash_primitives::memo::Memo;
 use std::convert::TryFrom;
 use std::collections::HashMap;
-
-pub struct Note {
-    pub height: u32,
-    pub value: u64,
-    pub memo: String,
-    pub position: u64,
-    pub rcm: Vec<u8>,
-    pub nf: Vec<u8>,
-    pub diversifier_index: u64,
-    pub spent: Option<u32>,
-}
 
 pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) -> anyhow::Result<u32> {
     let latest_block_id = client.get_latest_block(Request::new(ChainSpec {})).await?.into_inner();
@@ -92,11 +81,6 @@ pub struct DecryptedNote {
     pub rcm: [u8; 32],
     pub nf: [u8; 32],
     pub memo: String,
-}
-
-pub struct DecryptedBlock {
-    pub notes: Vec<DecryptedNote>,
-    pub count_notes: usize,
 }
 
 async fn scan_one_block(block: &CompactBlock, fvk: &ExtendedFullViewingKey, start_position: usize, tx: &Sender<TxIndex>) -> anyhow::Result<usize> {

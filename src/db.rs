@@ -7,7 +7,6 @@ use zcash_primitives::consensus::Parameters;
 use zcash_primitives::zip32::{DiversifierIndex, ExtendedFullViewingKey};
 use crate::scan::DecryptedNote;
 use std::collections::HashMap;
-use zcash_primitives::sapling::Nullifier;
 use crate::transaction::{Transfer, SubAddress};
 
 pub struct Db {

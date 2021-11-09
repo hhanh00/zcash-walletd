@@ -10,7 +10,7 @@ use tokio_stream::StreamExt;
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_primitives::zip32::ExtendedFullViewingKey;
 use tonic::Request;
-use crate::lwd_rpc::ChainSpec;
+use crate::lwd_rpc::*;
 
 #[derive(Serialize, Deserialize)]
 pub struct CreateAccountRequest {
@@ -151,17 +151,45 @@ pub async fn get_transfers(
     Ok(Json(rep))
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct MakePaymentRequest {}
+// TODO: get_height, sync_info
 
 #[derive(Serialize, Deserialize)]
-pub struct MakePaymentResponse {}
+pub struct GetHeightRequest {
+}
 
-#[post("/make_payment", data = "<request>")]
-pub fn make_payment(
-    request: Json<MakePaymentRequest>,
-) -> Result<Json<MakePaymentResponse>, Debug<anyhow::Error>> {
-    let rep = MakePaymentResponse {};
+#[derive(Serialize, Deserialize)]
+pub struct GetHeightResponse {
+    pub height: u32,
+}
+
+#[post("/get_height", data = "<_request>")]
+pub async fn get_height(_request: Json<GetHeightRequest>) -> Result<Json<GetHeightResponse>, Debug<anyhow::Error>> {
+    let mut client = CompactTxStreamerClient::connect(LWD_URL.to_string()).await.map_err(from_tonic)?;
+    let latest_height = get_latest_height(&mut client).await?;
+    let rep = GetHeightResponse {
+        height: latest_height
+    };
+    Ok(Json(rep))
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SyncInfoRequest {
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SyncInfoResponse {
+    pub target_height: u32,
+    pub current_height: u32,
+}
+
+#[post("/sync_info", data = "<_request>")]
+pub async fn sync_info(_request: Json<SyncInfoRequest>) -> Result<Json<SyncInfoResponse>, Debug<anyhow::Error>> {
+    let mut client = CompactTxStreamerClient::connect(LWD_URL.to_string()).await.map_err(from_tonic)?;
+    let rep = client.get_lightd_info(Request::new(Empty {})).await.map_err(from_tonic)?.into_inner();
+    let rep = SyncInfoResponse {
+        target_height: rep.block_height as u32,
+        current_height: rep.estimated_height as u32,
+    };
     Ok(Json(rep))
 }
 

@@ -46,16 +46,18 @@ fn rocket() -> _ {
             get_accounts,
             get_transaction,
             get_transfers,
-            make_payment,
+            get_height,
+            sync_info,
             request_scan,
         ],
     )
 }
 
+#[allow(dead_code)]
 fn to_tonic<E: ToString>(e: E) -> tonic::Status {
     tonic::Status::internal(e.to_string())
 }
 
-fn from_tonic(e: tonic::transport::Error) -> anyhow::Error {
+fn from_tonic<E: ToString>(e: E) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
 }
