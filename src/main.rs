@@ -45,6 +45,7 @@ fn rocket() -> _ {
             create_address,
             get_accounts,
             get_transaction,
+            get_transfers,
             make_payment,
             request_scan,
         ],

@@ -78,13 +78,11 @@ pub struct GetAccountsResponse {
     total_unlocked_balance: u64,
 }
 
-#[post("/get_accounts", data = "<request>")]
+#[post("/get_accounts", data = "<_request>")]
 pub async fn get_accounts(
-    request: Json<GetAccountsRequest>,
+    _request: Json<GetAccountsRequest>,
     db: &State<Db>,
 ) -> Result<Json<GetAccountsResponse>, Debug<anyhow::Error>> {
-    let request = request.into_inner();
-
     let mut client = CompactTxStreamerClient::connect(LWD_URL.to_string()).await.map_err(from_tonic)?;
     let latest_height = get_latest_height(&mut client).await?;
     let sub_accounts = db.get_accounts(latest_height)?;
@@ -107,32 +105,49 @@ pub struct GetTransactionByIdRequest {
 
 #[derive(Serialize, Deserialize)]
 pub struct GetTransactionByIdResponse {
-    pub transfer: Transfer,
     pub transfers: Vec<Transfer>,
 }
 
 #[post("/get_transfer_by_txid", data = "<request>")]
-pub fn get_transaction(
+pub async fn get_transaction(
     request: Json<GetTransactionByIdRequest>,
-) -> Json<GetTransactionByIdResponse> {
+    db: &State<Db>,
+) -> Result<Json<GetTransactionByIdResponse>, Debug<anyhow::Error>> {
+    let request = request.into_inner();
+    let mut client = CompactTxStreamerClient::connect(LWD_URL.to_string()).await.map_err(from_tonic)?;
+    let latest_height = get_latest_height(&mut client).await?;
+    let transfers = db.get_transfers_by_txid(latest_height, &request.txid, request.account_index)?;
     let rep = GetTransactionByIdResponse {
-        transfer: Transfer::default(),
-        transfers: vec![],
+        transfers,
     };
-    Json(rep)
+    Ok(Json(rep))
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GetTransfersRequest {}
+pub struct GetTransfersRequest {
+    pub account_index: u32,
+    pub r#in: bool,
+    pub subaddr_indices: Vec<u32>,
+}
 
 #[derive(Serialize, Deserialize)]
-pub struct GetTransfersResponse {}
+pub struct GetTransfersResponse {
+    pub r#in: Vec<Transfer>,
+}
 
 #[post("/get_transfers", data = "<request>")]
-pub fn get_transfers(
+pub async fn get_transfers(
     request: Json<GetTransfersRequest>,
+    db: &State<Db>,
 ) -> Result<Json<GetTransfersResponse>, Debug<anyhow::Error>> {
-    let rep = GetTransfersResponse {};
+    let request = request.into_inner();
+    assert!(request.r#in);
+    let mut client = CompactTxStreamerClient::connect(LWD_URL.to_string()).await.map_err(from_tonic)?;
+    let latest_height = get_latest_height(&mut client).await?;
+    let transfers = db.get_transfers(latest_height, request.account_index, &request.subaddr_indices)?;
+    let rep = GetTransfersResponse {
+        r#in: transfers,
+    };
     Ok(Json(rep))
 }
 

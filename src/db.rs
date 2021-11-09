@@ -1,6 +1,6 @@
 use crate::account::{Account, AccountBalance, SubAccount};
 use crate::{NETWORK, CONFIRMATIONS};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::sync::{Mutex, MutexGuard};
 use zcash_client_backend::encoding::encode_payment_address;
 use zcash_primitives::consensus::Parameters;
@@ -8,6 +8,7 @@ use zcash_primitives::zip32::{DiversifierIndex, ExtendedFullViewingKey};
 use crate::scan::DecryptedNote;
 use std::collections::HashMap;
 use zcash_primitives::sapling::Nullifier;
+use crate::transaction::{Transfer, SubAddress};
 
 pub struct Db {
     connection: Mutex<Connection>,
@@ -139,6 +140,67 @@ impl Db {
         println!("{} {}", id_note, id_tx);
         connection.execute("UPDATE received_notes SET spent = ?1 WHERE id_note = ?2", params![id_tx, id_note])?;
         Ok(())
+    }
+
+    fn row_to_transfer(row: &Row, latest_height: u32, account_index: u32) -> rusqlite::Result<Transfer> {
+        let address: String = row.get(0)?;
+        let value: u64 = row.get(1)?;
+        let sub_account: u32 = row.get(2)?;
+        let txid: Vec<u8> = row.get(3)?;
+        let memo: String = row.get(4)?;
+        let height: u32 = row.get(5)?;
+        let t = Transfer {
+            address,
+            amount: value,
+            confirmations: latest_height - height + 1,
+            height,
+            fee: 0,
+            note: memo,
+            payment_id: "".to_string(),
+            subaddr_index: SubAddress {
+                major: account_index,
+                minor: sub_account
+            },
+            suggested_confirmations_threshold: CONFIRMATIONS,
+            timestamp: 0, // TODO: Check if needed
+            txid: hex::encode(txid),
+            r#type: "in".to_string(),
+            unlock_time: 0
+        };
+        Ok(t)
+    }
+
+    pub fn get_transfers(&self, latest_height: u32, account_index: u32, sub_accounts: &[u32]) -> anyhow::Result<Vec<Transfer>> {
+        let connection = self.grab_lock();
+
+        let mut s = connection.prepare("SELECT address, n.value, sub_account, txid, memo, n.height \
+        FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
+        account = ?1")?;
+        let rows = s.query_map([account_index], |row| Self::row_to_transfer(row, latest_height, account_index))?;
+        let mut transfers: Vec<Transfer> = vec![];
+        for row in rows {
+            let row = row?;
+            if sub_accounts.contains(&row.subaddr_index.minor) {
+                transfers.push(row);
+            }
+        }
+        Ok(transfers)
+    }
+
+    pub fn get_transfers_by_txid(&self, latest_height: u32, txid: &str, account_index: u32) -> anyhow::Result<Vec<Transfer>> {
+        let connection = self.grab_lock();
+
+        let txid = hex::decode(txid)?;
+        let mut s = connection.prepare("SELECT address, n.value, sub_account, txid, memo, n.height \
+        FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
+        account = ?1 AND txid = ?2")?;
+        let rows = s.query_map(params![account_index, &txid], |row| Self::row_to_transfer(row, latest_height, account_index))?;
+        let mut transfers: Vec<Transfer> = vec![];
+        for row in rows {
+            let row = row?;
+            transfers.push(row);
+        }
+        Ok(transfers)
     }
 
     pub fn get_nfs(&self) -> anyhow::Result<HashMap<[u8; 32], u32>> {
