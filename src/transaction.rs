@@ -1,4 +1,4 @@
-use rocket::serde::{Serialize, Deserialize};
+use rocket::serde::{Deserialize, Serialize};
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct SubAddress {

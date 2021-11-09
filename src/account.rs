@@ -1,4 +1,4 @@
-use rocket::serde::{Serialize, Deserialize};
+use rocket::serde::{Deserialize, Serialize};
 
 pub struct Account {
     pub account_index: u32,
@@ -23,12 +23,14 @@ pub struct AccountBalance {
 
 #[cfg(test)]
 mod tests {
-    use bip39::{Seed, Mnemonic, Language};
-    use zcash_primitives::zip32::{ExtendedSpendingKey, ExtendedFullViewingKey, ChildIndex};
-    use zcash_client_backend::encoding::{encode_extended_spending_key, encode_extended_full_viewing_key, encode_payment_address};
-    use crate::NETWORK;
     use crate::account::Account;
+    use crate::NETWORK;
+    use bip39::{Language, Mnemonic, Seed};
+    use zcash_client_backend::encoding::{
+        encode_extended_full_viewing_key, encode_extended_spending_key, encode_payment_address,
+    };
     use zcash_primitives::consensus::Parameters;
+    use zcash_primitives::zip32::{ChildIndex, ExtendedFullViewingKey, ExtendedSpendingKey};
 
     #[allow(dead_code)]
     fn derive_account(phrase: &str, account_index: u32) -> anyhow::Result<Account> {
@@ -43,7 +45,9 @@ mod tests {
         let extsk = ExtendedSpendingKey::from_path(&master, &path);
         let esk = encode_extended_spending_key(NETWORK.hrp_sapling_extended_spending_key(), &extsk);
         let fvk = ExtendedFullViewingKey::from(&extsk);
-        let (_, pa) = fvk.default_address().map_err(|_| anyhow::anyhow!("Invalid FVK"))?;
+        let (_, pa) = fvk
+            .default_address()
+            .map_err(|_| anyhow::anyhow!("Invalid FVK"))?;
         let efvk =
             encode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk);
         let address = encode_payment_address(NETWORK.hrp_sapling_payment_address(), &pa);
@@ -51,8 +55,16 @@ mod tests {
         println!("{} {}", esk, efvk);
 
         Ok(Account {
-            account_index: account_index,
+            account_index,
             address,
         })
+    }
+
+    #[test]
+    fn test_seed() {
+        dotenv::dotenv().unwrap();
+        let seed = dotenv::var("SEED").unwrap();
+        let account = derive_account(&seed, 0).unwrap();
+        println!("{}", account.address);
     }
 }

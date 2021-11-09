@@ -1,9 +1,16 @@
-use rocket::serde::{Serialize, Deserialize, json::Json};
 use crate::account::AccountBalance;
-use rocket::response::Debug;
-use rocket::State;
 use crate::db::Db;
 use crate::transaction::Transfer;
+use rocket::response::Debug;
+use rocket::serde::{json::Json, Deserialize, Serialize};
+use rocket::State;
+use crate::scan::{scan_blocks, scan_transaction, get_latest_height};
+use crate::{LWD_URL, FVK, from_tonic};
+use tokio_stream::StreamExt;
+use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
+use zcash_primitives::zip32::ExtendedFullViewingKey;
+use tonic::Request;
+use crate::lwd_rpc::ChainSpec;
 
 #[derive(Serialize, Deserialize)]
 pub struct CreateAccountRequest {
@@ -17,7 +24,10 @@ pub struct CreateAccountResponse {
 }
 
 #[post("/create_account", data = "<request>")]
-pub fn create_account(request: Json<CreateAccountRequest>, db: &State<Db>) -> Result<Json<CreateAccountResponse>, Debug<anyhow::Error>> {
+pub fn create_account(
+    request: Json<CreateAccountRequest>,
+    db: &State<Db>,
+) -> Result<Json<CreateAccountResponse>, Debug<anyhow::Error>> {
     let request = request.into_inner();
     let name = request.label.unwrap_or("".to_string());
 
@@ -42,7 +52,10 @@ pub struct CreateAddressResponse {
 }
 
 #[post("/create_address", data = "<request>")]
-pub fn create_address(request: Json<CreateAddressRequest>, db: &State<Db>) -> Result<Json<CreateAddressResponse>, Debug<anyhow::Error>> {
+pub fn create_address(
+    request: Json<CreateAddressRequest>,
+    db: &State<Db>,
+) -> Result<Json<CreateAddressResponse>, Debug<anyhow::Error>> {
     let request = request.into_inner();
     let name = request.label.unwrap_or("".to_string());
     let sub_account = db.new_sub_account(request.account_index, &name)?;
@@ -66,10 +79,15 @@ pub struct GetAccountsResponse {
 }
 
 #[post("/get_accounts", data = "<request>")]
-pub fn get_accounts(request: Json<GetAccountsRequest>, db: &State<Db>) -> Result<Json<GetAccountsResponse>, Debug<anyhow::Error>> {
+pub async fn get_accounts(
+    request: Json<GetAccountsRequest>,
+    db: &State<Db>,
+) -> Result<Json<GetAccountsResponse>, Debug<anyhow::Error>> {
     let request = request.into_inner();
 
-    let sub_accounts = db.get_accounts()?;
+    let mut client = CompactTxStreamerClient::connect(LWD_URL.to_string()).await.map_err(from_tonic)?;
+    let latest_height = get_latest_height(&mut client).await?;
+    let sub_accounts = db.get_accounts(latest_height)?;
     let total_balance: u64 = sub_accounts.iter().map(|sa| sa.balance).sum();
     let total_unlocked_balance: u64 = sub_accounts.iter().map(|sa| sa.unlocked_balance).sum();
 
@@ -80,6 +98,7 @@ pub fn get_accounts(request: Json<GetAccountsRequest>, db: &State<Db>) -> Result
     };
     Ok(Json(rep))
 }
+
 #[derive(Serialize, Deserialize)]
 pub struct GetTransactionByIdRequest {
     pub txid: String,
@@ -92,25 +111,80 @@ pub struct GetTransactionByIdResponse {
     pub transfers: Vec<Transfer>,
 }
 
-#[post("/get_transaction", data = "<request>")]
-pub fn get_transaction(request: Json<GetTransactionByIdRequest>) -> Json<GetTransactionByIdResponse> {
+#[post("/get_transfer_by_txid", data = "<request>")]
+pub fn get_transaction(
+    request: Json<GetTransactionByIdRequest>,
+) -> Json<GetTransactionByIdResponse> {
     let rep = GetTransactionByIdResponse {
         transfer: Transfer::default(),
         transfers: vec![],
     };
     Json(rep)
 }
+
 #[derive(Serialize, Deserialize)]
-pub struct MakePaymentRequest {
+pub struct GetTransfersRequest {}
+
+#[derive(Serialize, Deserialize)]
+pub struct GetTransfersResponse {}
+
+#[post("/get_transfers", data = "<request>")]
+pub fn get_transfers(
+    request: Json<GetTransfersRequest>,
+) -> Result<Json<GetTransfersResponse>, Debug<anyhow::Error>> {
+    let rep = GetTransfersResponse {};
+    Ok(Json(rep))
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct MakePaymentResponse {
-}
+pub struct MakePaymentRequest {}
+
+#[derive(Serialize, Deserialize)]
+pub struct MakePaymentResponse {}
 
 #[post("/make_payment", data = "<request>")]
-pub fn make_payment(request: Json<MakePaymentRequest>) -> Json<MakePaymentResponse> {
-    let rep = MakePaymentResponse {
-    };
-    Json(rep)
+pub fn make_payment(
+    request: Json<MakePaymentRequest>,
+) -> Result<Json<MakePaymentResponse>, Debug<anyhow::Error>> {
+    let rep = MakePaymentResponse {};
+    Ok(Json(rep))
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ScanRequest {
+    start_height: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ScanResponse {}
+
+#[post("/request_scan", data = "<request>")]
+pub async fn request_scan(
+    request: Json<ScanRequest>,
+    db: &State<Db>,
+    fvk: &State<FVK>,
+) -> Result<Json<ScanResponse>, Debug<anyhow::Error>> {
+    let request = request.into_inner();
+    let fvk: ExtendedFullViewingKey = fvk.0.lock().unwrap().clone();
+    let vk = fvk.fvk.vk.clone();
+    let ivk = vk.ivk();
+
+    let mut client = CompactTxStreamerClient::connect(LWD_URL.to_string()).await.map_err(from_tonic)?;
+    let mut stream = scan_blocks(request.start_height, LWD_URL, &fvk).await?;
+    let mut nf_map = db.get_nfs()?;
+    while let Some(tx_index) = stream.next().await {
+        let (spends, outputs, value) = scan_transaction(&mut client, tx_index.height, tx_index.tx_id, tx_index.position, &vk, &ivk, &nf_map).await?;
+        let id_tx = db.store_tx(&tx_index.tx_id.0, tx_index.height, value)?;
+        for id_note in spends.iter() {
+            db.mark_spent(*id_note, id_tx)?;
+        }
+        for n in outputs.iter() {
+            println!("{}", hex::encode(&n.nf));
+            let id_note = db.store_note(n, id_tx)?;
+            nf_map.insert(n.nf, id_note);
+        }
+        // println!("{} {}", hex::encode(tx_index.tx_id.0), tx_index.position);
+    }
+    let rep = ScanResponse {};
+    Ok(Json(rep))
 }
