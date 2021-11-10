@@ -2903,6 +2903,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "thiserror",
  "tiny-bip39",
  "tokio",
  "tokio-stream",

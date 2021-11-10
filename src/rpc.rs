@@ -5,13 +5,14 @@ use rocket::response::Debug;
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::State;
 use crate::scan::{scan_blocks, scan_transaction, get_latest_height};
-use crate::{LWD_URL, FVK, from_tonic, NOTIFY_TX_URL};
+use crate::{LWD_URL, FVK, from_tonic, NOTIFY_TX_URL, CONFIRMATIONS};
 use tokio_stream::StreamExt;
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
 use zcash_primitives::zip32::ExtendedFullViewingKey;
 use tonic::Request;
 use crate::lwd_rpc::*;
 use zcash_primitives::transaction::components::amount::DEFAULT_FEE;
+use crate::scan::ScanError;
 
 #[derive(Serialize, Deserialize)]
 pub struct CreateAccountRequest {
@@ -229,7 +230,16 @@ pub async fn request_scan(
     let request = request.into_inner();
     let fvk: ExtendedFullViewingKey = fvk.0.lock().unwrap().clone();
 
-    scan(fvk, request.start_height, db).await?;
+    let res = scan(fvk, request.start_height, db).await;
+    if let Err(error) = res { // Rewind if we hit a chain reorg but don't error
+        match error.root_cause().downcast_ref::<ScanError>() {
+            Some(ScanError::Reorganization) => {
+                let synced_height = db.get_synced_height()?;
+                db.truncate_height(synced_height - CONFIRMATIONS)
+            },
+            None => Err(error),
+        }?
+    }
     let rep = ScanResponse {};
     Ok(Json(rep))
 }
@@ -244,8 +254,9 @@ pub async fn scan(fvk: ExtendedFullViewingKey, start_height: Option<u32>, db: &D
     };
 
     db.truncate_height(start_height)?;
+    let prev_block_hash = db.get_block_hash(start_height - 1)?;
     let mut client = CompactTxStreamerClient::connect(LWD_URL.to_string()).await.map_err(from_tonic)?;
-    let (mut stream, scanner_handle) = scan_blocks(start_height, LWD_URL, &fvk).await?;
+    let (mut stream, scanner_handle) = scan_blocks(start_height, LWD_URL, &fvk, prev_block_hash).await?;
     let mut nf_map = db.get_nfs()?;
     while let Some(tx_index) = stream.next().await {
         let (spends, outputs, value) = scan_transaction(&mut client, tx_index.height, tx_index.tx_id, tx_index.position, &vk, &ivk, &nf_map).await?;

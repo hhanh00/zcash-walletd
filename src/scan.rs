@@ -22,6 +22,13 @@ use rocket::futures::{FutureExt, future};
 use rocket::futures::future::BoxFuture;
 use crate::lwd_rpc::{ChainSpec, BlockId, BlockRange, CompactBlock, CompactOutput, TxFilter};
 use tokio::time::Duration;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ScanError {
+    #[error("Blockchain Reorganization")]
+    Reorganization,
+}
 
 pub struct Block {
     pub height: u32,
@@ -34,7 +41,7 @@ pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) ->
     Ok(latest_height as u32)
 }
 
-pub async fn scan_blocks(start_height: u32, lwd_url: &str, fvk: &ExtendedFullViewingKey) -> anyhow::Result<(impl Stream<Item=TxIndex>, BoxFuture<'static, anyhow::Result<Option<Block>>>)> {
+pub async fn scan_blocks(start_height: u32, lwd_url: &str, fvk: &ExtendedFullViewingKey, mut prev_block_hash: Option<[u8; 32]>) -> anyhow::Result<(impl Stream<Item=TxIndex>, BoxFuture<'static, anyhow::Result<Option<Block>>>)> {
     let mut client = CompactTxStreamerClient::connect(lwd_url.to_string()).await?;
     let latest_height = get_latest_height(&mut client).await?;
     let start_block_id = BlockId {
@@ -66,6 +73,15 @@ pub async fn scan_blocks(start_height: u32, lwd_url: &str, fvk: &ExtendedFullVie
         let jh = tokio::spawn(async move {
             let mut last_block: Option<Block> = None;
             while let Some(block) = block_stream.message().await? {
+                let prev_block_hash = prev_block_hash.take();
+                if let Some(prev_block_hash) = prev_block_hash {
+                    println!("Chaintip check");
+                    println!("{} {}", hex::encode(&prev_block_hash), hex::encode(&block.prev_hash));
+                    if prev_block_hash.to_vec() != block.prev_hash {
+                        println!("Chaintip check");
+                        return Err(ScanError::Reorganization.into());
+                    }
+                }
                 let count_notes = scan_one_block(&block, &fvk2, current_position, &tx).await?;
                 current_position += count_notes;
                 let mut b = Block {

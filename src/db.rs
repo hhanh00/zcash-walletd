@@ -137,7 +137,6 @@ impl Db {
     }
 
     pub fn get_synced_height(&self) -> anyhow::Result<u32> {
-
         let connection = self.grab_lock();
 
         let height = connection.query_row("SELECT MAX(height) FROM blocks", [], |row| {
@@ -146,6 +145,18 @@ impl Db {
             Ok(height)
         })?;
         Ok(height)
+    }
+
+    pub fn get_block_hash(&self, height: u32) -> anyhow::Result<Option<[u8; 32]>> {
+        let connection = self.grab_lock();
+
+        let hash = connection.query_row("SELECT hash FROM blocks WHERE height = ?1", [height], |row| {
+            let hash_vec: Vec<u8> = row.get(0)?;
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&hash_vec);
+            Ok(hash)
+        }).optional()?;
+        Ok(hash)
     }
 
     pub fn mark_spent(&self, id_note: u32, id_tx: u32) -> anyhow::Result<()> {
