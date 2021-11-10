@@ -16,8 +16,9 @@ hex = "0.4.3"
 
 # REST / RPC
 rocket = { version = "0.5.0-rc.1", features = [ "json" ] }
-tonic = {version = "0.4.3", features = ["tls", "tls-roots"]}
+tonic = { version = "0.4.3", features = ["tls", "tls-roots"] }
 prost = "0.7"
+reqwest = { version = "0.11.6", features = ["json"] }
 
 # Async
 tokio = { version = "^1.6", features = ["macros", "rt-multi-thread"] }
@@ -37,13 +38,13 @@ group = "0.9.0"
 tonic-build = "0.4.2"
 
 [dependencies.zcash_client_backend]
-git = "https://github.com/zcash/librustzcash.git"
-rev = "35023ed8ca2fb1061e78fd740b640d4eefcc5edd"
+git = "https://github.com/hhanh00/librustzcash.git"
+rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"
 
 [dependencies.zcash_primitives]
-git = "https://github.com/zcash/librustzcash.git"
-rev = "35023ed8ca2fb1061e78fd740b640d4eefcc5edd"
+git = "https://github.com/hhanh00/librustzcash.git"
+rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"
 
 [dependencies.zcash_proofs]
-git = "https://github.com/zcash/librustzcash.git"
-rev = "35023ed8ca2fb1061e78fd740b640d4eefcc5edd"
+git = "https://github.com/hhanh00/librustzcash.git"
+rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"

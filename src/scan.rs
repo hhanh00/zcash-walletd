@@ -1,5 +1,4 @@
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
-use crate::lwd_rpc::*;
 use tonic::Request;
 use zcash_primitives::zip32::ExtendedFullViewingKey;
 use zcash_primitives::transaction::components::sapling::CompactOutputDescription;
@@ -19,6 +18,15 @@ use tonic::transport::Channel;
 use zcash_primitives::memo::Memo;
 use std::convert::TryFrom;
 use std::collections::HashMap;
+use rocket::futures::{FutureExt, future};
+use rocket::futures::future::BoxFuture;
+use crate::lwd_rpc::{ChainSpec, BlockId, BlockRange, CompactBlock, CompactOutput, TxFilter};
+use tokio::time::Duration;
+
+pub struct Block {
+    pub height: u32,
+    pub hash: [u8; 32],
+}
 
 pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) -> anyhow::Result<u32> {
     let latest_block_id = client.get_latest_block(Request::new(ChainSpec {})).await?.into_inner();
@@ -26,43 +34,56 @@ pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) ->
     Ok(latest_height as u32)
 }
 
-pub async fn scan_blocks(start_height: u32, lwd_url: &str, fvk: &ExtendedFullViewingKey) -> anyhow::Result<impl Stream<Item=TxIndex>> {
+pub async fn scan_blocks(start_height: u32, lwd_url: &str, fvk: &ExtendedFullViewingKey) -> anyhow::Result<(impl Stream<Item=TxIndex>, BoxFuture<'static, anyhow::Result<Option<Block>>>)> {
     let mut client = CompactTxStreamerClient::connect(lwd_url.to_string()).await?;
     let latest_height = get_latest_height(&mut client).await?;
     let start_block_id = BlockId {
         height: start_height as u64,
         hash: vec![],
     };
-    let tree_state = client.get_tree_state(Request::new(start_block_id)).await?.into_inner();
-    let commitment_tree = hex::decode(tree_state.tree)?;
-    let commitment_tree = CommitmentTree::<Node>::read(&*commitment_tree)?;
-    let mut current_position = commitment_tree.size();
-    let mut block_stream = client
-        .get_block_range(Request::new(BlockRange {
-            start: Some(BlockId {
-                height: start_height as u64,
-                hash: vec![],
-            }),
-            end: Some(BlockId {
-                height: latest_height as u64,
-                hash: vec![],
-            }),
-        }))
-        .await?
-        .into_inner();
-
     let (tx, rx) = channel::<TxIndex>(1);
-    let fvk2 = fvk.clone();
-    tokio::spawn(async move {
-        while let Some(block) = block_stream.message().await? {
-            let count_notes = scan_one_block(&block, &fvk2, current_position, &tx).await?;
-            current_position += count_notes;
-        }
-        println!("SCAN FINISHED");
-        Ok::<_, anyhow::Error>(())
-    });
+    if start_height <= latest_height {
+        let tree_state = client.get_tree_state(Request::new(start_block_id)).await?.into_inner();
+        let commitment_tree = hex::decode(tree_state.tree)?;
+        let commitment_tree = CommitmentTree::<Node>::read(&*commitment_tree)?;
+        let mut current_position = commitment_tree.size();
+        println!("Scanning from {} to {}", start_height, latest_height);
+        let mut block_stream = client
+            .get_block_range(Request::new(BlockRange {
+                start: Some(BlockId {
+                    height: start_height as u64,
+                    hash: vec![],
+                }),
+                end: Some(BlockId {
+                    height: latest_height as u64,
+                    hash: vec![],
+                }),
+            }))
+            .await?
+            .into_inner();
 
-    Ok(ReceiverStream::new(rx))
+        let fvk2 = fvk.clone();
+        let jh = tokio::spawn(async move {
+            let mut last_block: Option<Block> = None;
+            while let Some(block) = block_stream.message().await? {
+                let count_notes = scan_one_block(&block, &fvk2, current_position, &tx).await?;
+                current_position += count_notes;
+                let mut b = Block {
+                    height: block.height as u32,
+                    hash: [0u8; 32],
+                };
+                b.hash.copy_from_slice(&block.hash);
+                last_block = Some(b);
+            }
+            println!("SCAN FINISHED");
+            Ok::<_, anyhow::Error>(last_block)
+        });
+
+        Ok((ReceiverStream::new(rx), Box::pin(jh.map(|e| e?))))
+    }
+    else {
+        Ok((ReceiverStream::new(rx), Box::pin(future::ok(None))))
+    }
 }
 
 #[derive(Debug)]
@@ -168,7 +189,22 @@ pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, hei
         }
     }
 
-    println!("{}", tx.txid());
+    println!("TXID: {}", tx.txid());
     let value = i64::from(tx.value_balance);
     Ok((spends, outputs, value))
+}
+
+#[allow(unreachable_code)]
+pub async fn monitor_task(port: u16) {
+    tokio::spawn(async move {
+        loop {
+            let client = reqwest::Client::new();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            client
+                .post(format!("http://localhost:{}/request_scan", port))
+                .json(&HashMap::<String, String>::new())
+                .send().await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
 }

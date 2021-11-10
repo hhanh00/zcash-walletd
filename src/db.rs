@@ -3,7 +3,7 @@ use crate::{NETWORK, CONFIRMATIONS};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::sync::{Mutex, MutexGuard};
 use zcash_client_backend::encoding::encode_payment_address;
-use zcash_primitives::consensus::Parameters;
+use zcash_primitives::consensus::{Parameters, NetworkUpgrade};
 use zcash_primitives::zip32::{DiversifierIndex, ExtendedFullViewingKey};
 use crate::scan::DecryptedNote;
 use std::collections::HashMap;
@@ -35,10 +35,6 @@ impl Db {
 
         connection.execute("INSERT INTO addresses(label, account, sub_account, address, diversifier_index) VALUES (?1,?2,?3,?4,?5)",
                            params![name, id_account, 0, &address, diversifier_index])?;
-        connection.execute(
-            "INSERT INTO balances(account, total, unlocked) VALUES (?1,0,0)",
-            params![id_account],
-        )?;
         let account = Account {
             account_index: id_account,
             address,
@@ -133,6 +129,25 @@ impl Db {
         Ok(id_tx)
     }
 
+    pub fn store_block(&self, height: u32, hash: &[u8]) -> anyhow::Result<()> {
+        let connection = self.grab_lock();
+
+        connection.execute("INSERT INTO blocks(height, hash) VALUES (?1,?2)", params![height, hash])?;
+        Ok(())
+    }
+
+    pub fn get_synced_height(&self) -> anyhow::Result<u32> {
+
+        let connection = self.grab_lock();
+
+        let height = connection.query_row("SELECT MAX(height) FROM blocks", [], |row| {
+            let h: Option<u32> = row.get(0)?;
+            let height = h.unwrap_or_else(|| u32::from(NETWORK.activation_height(NetworkUpgrade::Sapling).unwrap()));
+            Ok(height)
+        })?;
+        Ok(height)
+    }
+
     pub fn mark_spent(&self, id_note: u32, id_tx: u32) -> anyhow::Result<()> {
         let connection = self.grab_lock();
 
@@ -145,7 +160,8 @@ impl Db {
         let address: String = row.get(0)?;
         let value: u64 = row.get(1)?;
         let sub_account: u32 = row.get(2)?;
-        let txid: Vec<u8> = row.get(3)?;
+        let mut txid: Vec<u8> = row.get(3)?;
+        txid.reverse();
         let memo: String = row.get(4)?;
         let height: u32 = row.get(5)?;
         let t = Transfer {
@@ -189,17 +205,28 @@ impl Db {
     pub fn get_transfers_by_txid(&self, latest_height: u32, txid: &str, account_index: u32) -> anyhow::Result<Vec<Transfer>> {
         let connection = self.grab_lock();
 
-        let txid = hex::decode(txid)?;
+        let mut txid = hex::decode(txid)?;
+        txid.reverse();
         let mut s = connection.prepare("SELECT address, n.value, sub_account, txid, memo, n.height \
         FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
-        account = ?1 AND txid = ?2")?;
-        let rows = s.query_map(params![account_index, &txid], |row| Self::row_to_transfer(row, latest_height, account_index))?;
+        txid = ?1")?;
+        let rows = s.query_map(params![&txid], |row| Self::row_to_transfer(row, latest_height, account_index))?;
         let mut transfers: Vec<Transfer> = vec![];
         for row in rows {
             let row = row?;
             transfers.push(row);
         }
+        println!("count = {}", transfers.len());
         Ok(transfers)
+    }
+
+    pub fn truncate_height(&self, height: u32) -> anyhow::Result<()> {
+        let connection = self.grab_lock();
+
+        connection.execute("DELETE FROM transactions WHERE height >= ?1", [height])?;
+        connection.execute("DELETE FROM received_notes WHERE height >= ?1", [height])?;
+        connection.execute("DELETE FROM blocks WHERE height >= ?1", [height])?;
+        Ok(())
     }
 
     pub fn get_nfs(&self) -> anyhow::Result<HashMap<[u8; 32], u32>> {
@@ -254,6 +281,14 @@ impl Db {
 
     pub fn create(&self) -> anyhow::Result<()> {
         let connection = self.grab_lock();
+
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS blocks (
+            height INTEGER PRIMARY KEY,
+            hash BLOB NOT NULL)",
+            [],
+        )?;
+
         connection.execute(
             "CREATE TABLE IF NOT EXISTS addresses (
             id_address INTEGER PRIMARY KEY,
@@ -266,28 +301,11 @@ impl Db {
         )?;
 
         connection.execute(
-            "CREATE TABLE IF NOT EXISTS balances (
-            account INTEGER PRIMARY KEY,
-            total INTEGER NOT NULL,
-            unlocked INTEGER NOT NULL)",
-            [],
-        )?;
-
-        connection.execute(
             "CREATE TABLE IF NOT EXISTS transactions (
             id_tx INTEGER PRIMARY KEY,
             txid BLOB NOT NULL UNIQUE,
             height INTEGER NOT NULL,
             value INTEGER NOT NULL)",
-            [],
-        )?;
-
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS transfers (
-            id_tx INTEGER NOT NULL,
-            id_note INTEGER NOT NULL,
-            is_spent BOOL NOT NULL,
-            PRIMARY KEY (id_tx, id_note))",
             [],
         )?;
 
