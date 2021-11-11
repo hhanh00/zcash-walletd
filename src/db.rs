@@ -1,5 +1,5 @@
 use crate::account::{Account, AccountBalance, SubAccount};
-use crate::{NETWORK, CONFIRMATIONS};
+use crate::NETWORK;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use std::sync::{Mutex, MutexGuard};
 use zcash_client_backend::encoding::encode_payment_address;
@@ -63,7 +63,7 @@ impl Db {
         Ok(sub_account)
     }
 
-    pub fn get_accounts(&self, height: u32) -> anyhow::Result<Vec<AccountBalance>> {
+    pub fn get_accounts(&self, height: u32, confirmations: u32) -> anyhow::Result<Vec<AccountBalance>> {
         let connection = self.grab_lock();
         let mut s = connection.prepare(
             "WITH base AS (SELECT account, address FROM addresses WHERE sub_account = 0), \
@@ -72,7 +72,7 @@ impl Db {
             SELECT a.account, a.label, b.total, COALESCE(u.unlocked, 0) AS unlocked, base.address as base_address \
             FROM addresses a JOIN balances b ON a.account = b.account LEFT JOIN unlocked_balances u ON u.account = a.account JOIN base ON base.account = a.account GROUP BY a.account")?;
 
-        let confirmed_height = height - CONFIRMATIONS + 1;
+        let confirmed_height = height - confirmations + 1;
         let rows = s.query_map([confirmed_height], |row| {
             let id_account: u32 = row.get(0)?;
             let label: String = row.get(1)?;
@@ -162,12 +162,11 @@ impl Db {
     pub fn mark_spent(&self, id_note: u32, id_tx: u32) -> anyhow::Result<()> {
         let connection = self.grab_lock();
 
-        println!("{} {}", id_note, id_tx);
         connection.execute("UPDATE received_notes SET spent = ?1 WHERE id_note = ?2", params![id_tx, id_note])?;
         Ok(())
     }
 
-    fn row_to_transfer(row: &Row, latest_height: u32, account_index: u32) -> rusqlite::Result<Transfer> {
+    fn row_to_transfer(row: &Row, latest_height: u32, account_index: u32, confirmations: u32) -> rusqlite::Result<Transfer> {
         let address: String = row.get(0)?;
         let value: u64 = row.get(1)?;
         let sub_account: u32 = row.get(2)?;
@@ -187,7 +186,7 @@ impl Db {
                 major: account_index,
                 minor: sub_account
             },
-            suggested_confirmations_threshold: CONFIRMATIONS,
+            suggested_confirmations_threshold: confirmations,
             timestamp: 0, // TODO: Check if needed
             txid: hex::encode(txid),
             r#type: "in".to_string(),
@@ -196,13 +195,13 @@ impl Db {
         Ok(t)
     }
 
-    pub fn get_transfers(&self, latest_height: u32, account_index: u32, sub_accounts: &[u32]) -> anyhow::Result<Vec<Transfer>> {
+    pub fn get_transfers(&self, latest_height: u32, account_index: u32, sub_accounts: &[u32], confirmations: u32) -> anyhow::Result<Vec<Transfer>> {
         let connection = self.grab_lock();
 
         let mut s = connection.prepare("SELECT address, n.value, sub_account, txid, memo, n.height \
         FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
         account = ?1")?;
-        let rows = s.query_map([account_index], |row| Self::row_to_transfer(row, latest_height, account_index))?;
+        let rows = s.query_map([account_index], |row| Self::row_to_transfer(row, latest_height, account_index, confirmations))?;
         let mut transfers: Vec<Transfer> = vec![];
         for row in rows {
             let row = row?;
@@ -213,7 +212,7 @@ impl Db {
         Ok(transfers)
     }
 
-    pub fn get_transfers_by_txid(&self, latest_height: u32, txid: &str, account_index: u32) -> anyhow::Result<Vec<Transfer>> {
+    pub fn get_transfers_by_txid(&self, latest_height: u32, txid: &str, account_index: u32, confirmations: u32) -> anyhow::Result<Vec<Transfer>> {
         let connection = self.grab_lock();
 
         let mut txid = hex::decode(txid)?;
@@ -221,13 +220,12 @@ impl Db {
         let mut s = connection.prepare("SELECT address, n.value, sub_account, txid, memo, n.height \
         FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
         txid = ?1")?;
-        let rows = s.query_map(params![&txid], |row| Self::row_to_transfer(row, latest_height, account_index))?;
+        let rows = s.query_map(params![&txid], |row| Self::row_to_transfer(row, latest_height, account_index, confirmations))?;
         let mut transfers: Vec<Transfer> = vec![];
         for row in rows {
             let row = row?;
             transfers.push(row);
         }
-        println!("count = {}", transfers.len());
         Ok(transfers)
     }
 
