@@ -3,6 +3,7 @@ db_path = "zec-wallet.db"
 confirmations = 10
 lwd_url = "https://lite.ycash.xyz:9067"
 notify_tx_url = "https://localhost:14142/zcashlikedaemoncallback/tx?cryptoCode=yec&hash="
+birth_height = 1050000
 
 [debug]
 address = "127.0.0.1"

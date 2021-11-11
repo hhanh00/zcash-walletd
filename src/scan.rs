@@ -215,15 +215,21 @@ pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, hei
 }
 
 #[allow(unreachable_code)]
-pub async fn monitor_task(port: u16) {
+pub async fn monitor_task(birth_height: Option<u32>, port: u16) {
+    let mut params = HashMap::<&str, u32>::new();
+    if let Some(birth_height) = birth_height {
+        params.insert("start_height", birth_height);
+    }
     tokio::spawn(async move {
         loop {
             let client = reqwest::Client::new();
-            tokio::time::sleep(Duration::from_secs(5)).await;
             client
                 .post(format!("http://localhost:{}/request_scan", port))
-                .json(&HashMap::<String, String>::new())
+                .json(&params)
                 .send().await?;
+            params.clear();
+
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
         Ok::<_, anyhow::Error>(())
     });

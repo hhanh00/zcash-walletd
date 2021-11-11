@@ -41,11 +41,12 @@ pub struct WalletConfig {
     confirmations: u32,
     lwd_url: String,
     notify_tx_url: String,
+    birth_height: Option<u32>,
 }
 
 #[rocket::main]
 async fn main() -> anyhow::Result<()> {
-    dotenv::dotenv().unwrap();
+    dotenv::dotenv().expect(".env file missing");
     env_logger::init();
     let fvk = dotenv::var("VK")
         .context("Seed missing from .env file")
@@ -57,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let db = Db::new(&config.db_path, &fvk);
     let fvk = FVK(Mutex::new(fvk.clone()));
     db.create().unwrap();
-    monitor_task(config.port).await;
+    monitor_task(config.birth_height, config.port).await;
     rocket.manage(db).manage(fvk)
         .mount(
             "/",

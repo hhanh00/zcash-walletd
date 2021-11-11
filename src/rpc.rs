@@ -290,8 +290,11 @@ pub async fn notify_tx(tx_id: &[u8], notify_tx_url: &str) -> anyhow::Result<()> 
     tx_id.reverse();
     let url = notify_tx_url.to_string() + &hex::encode(&tx_id);
     // TODO: Remove self signed certificate accept
-    reqwest::Client::builder().danger_accept_invalid_certs(true)
-        .build()?.get(url).send().await?;
+    let res = reqwest::Client::builder().danger_accept_invalid_certs(true)
+        .build()?.get(url).send().await;
+    if let Err(e) = res {
+        log::warn!("Failed to notify new tx: {}", e.to_string());
+    }
 
     Ok(())
 }
