@@ -10,10 +10,11 @@ mod rpc;
 mod scan;
 mod transaction;
 
+use std::str::FromStr;
 pub use crate::rpc::*;
 use zcash_primitives::consensus::{Network, Parameters};
 
-pub const NETWORK: Network = Network::YCashMainNetwork;
+pub const NETWORK: Network = Network::MainNetwork;
 
 // They come from the config file
 //
@@ -41,16 +42,16 @@ pub struct WalletConfig {
     confirmations: u32,
     lwd_url: String,
     notify_tx_url: String,
-    birth_height: Option<u32>,
 }
 
 #[rocket::main]
 async fn main() -> anyhow::Result<()> {
-    dotenv::dotenv().expect(".env file missing");
+    dotenv::dotenv().ok();
     env_logger::init();
     let fvk = dotenv::var("VK")
         .context("Seed missing from .env file")
         .unwrap();
+    let birth_height = dotenv::var("BIRTH_HEIGHT").ok().map(|h| u32::from_str(&h).unwrap());
     let fvk = decode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk).unwrap().unwrap();
     let rocket = rocket::build();
     let figment = rocket.figment();
@@ -58,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let db = Db::new(&config.db_path, &fvk);
     let fvk = FVK(Mutex::new(fvk.clone()));
     db.create().unwrap();
-    monitor_task(config.birth_height, config.port).await;
+    monitor_task(birth_height, config.port).await;
     rocket.manage(db).manage(fvk)
         .mount(
             "/",

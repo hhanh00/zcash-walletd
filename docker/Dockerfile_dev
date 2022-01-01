@@ -1,0 +1,16 @@
+#syntax=docker/dockerfile:1.2
+FROM archlinux:base-devel as builder
+
+COPY ./docker/install-rust.sh .
+RUN /bin/sh ./install-rust.sh
+ENV PATH $PATH:/root/.cargo/bin
+
+COPY . /zcash-walletd
+
+RUN cd /zcash-walletd && cargo build --release && cp Rocket.toml target/release
+
+WORKDIR /zcash-walletd
+ENV PATH $PATH:/zcash-walletd/target/release
+ENV RUST_LOG info
+
+ENTRYPOINT ["zcash-walletd"]

@@ -235,6 +235,8 @@ impl Db {
         connection.execute("DELETE FROM transactions WHERE height >= ?1", [height])?;
         connection.execute("DELETE FROM received_notes WHERE height >= ?1", [height])?;
         connection.execute("DELETE FROM blocks WHERE height >= ?1", [height])?;
+        connection.execute("UPDATE received_notes SET spent = NULL WHERE spent >= ?1", [height])?;
+
         Ok(())
     }
 

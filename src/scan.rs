@@ -229,7 +229,7 @@ pub async fn monitor_task(birth_height: Option<u32>, port: u16) {
                 .send().await?;
             params.clear();
 
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
         }
         Ok::<_, anyhow::Error>(())
     });
