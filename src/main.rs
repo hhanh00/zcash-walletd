@@ -14,6 +14,15 @@ use std::str::FromStr;
 pub use crate::rpc::*;
 use zcash_primitives::consensus::{Network, Parameters};
 
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[clap(about, version, author)]
+struct Args {
+    #[clap(short, long)]
+    rescan: bool,
+}
+
 pub const NETWORK: Network = Network::MainNetwork;
 
 // They come from the config file
@@ -42,24 +51,34 @@ pub struct WalletConfig {
     confirmations: u32,
     lwd_url: String,
     notify_tx_url: String,
+    poll_interval: u16,
 }
 
 #[rocket::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
+    let args: Args = Args::parse();
     let fvk = dotenv::var("VK")
         .context("Seed missing from .env file")
         .unwrap();
-    let birth_height = dotenv::var("BIRTH_HEIGHT").ok().map(|h| u32::from_str(&h).unwrap());
     let fvk = decode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk).unwrap().unwrap();
     let rocket = rocket::build();
     let figment = rocket.figment();
     let config: WalletConfig = figment.extract().unwrap();
     let db = Db::new(&config.db_path, &fvk);
     let fvk = FVK(Mutex::new(fvk.clone()));
-    db.create().unwrap();
-    monitor_task(birth_height, config.port).await;
+    let db_exists = db.create().unwrap();
+    if !db_exists {
+        db.new_account("")?;
+    }
+    let birth_height =
+        if !db_exists || args.rescan {
+            dotenv::var("BIRTH_HEIGHT").ok().map(|h| u32::from_str(&h).unwrap())
+        }
+    else { None };
+
+    monitor_task(birth_height, config.port, config.poll_interval).await;
     rocket.manage(db).manage(fvk)
         .mount(
             "/",

@@ -3,6 +3,7 @@ db_path = "/data/zec-wallet-main.db"
 confirmations = 6
 lwd_url = "https://mainnet.lightwalletd.com:9067"
 notify_tx_url = "http://btcp:9000/zcashlikedaemoncallback/tx?cryptoCode=zec&hash="
+poll_interval = 60
 
 [debug]
 address = "127.0.0.1"

@@ -215,7 +215,7 @@ pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, hei
 }
 
 #[allow(unreachable_code)]
-pub async fn monitor_task(birth_height: Option<u32>, port: u16) {
+pub async fn monitor_task(birth_height: Option<u32>, port: u16, poll_interval: u16) {
     let mut params = HashMap::<&str, u32>::new();
     if let Some(birth_height) = birth_height {
         params.insert("start_height", birth_height);
@@ -229,7 +229,7 @@ pub async fn monitor_task(birth_height: Option<u32>, port: u16) {
                 .send().await?;
             params.clear();
 
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(Duration::from_secs(poll_interval as u64)).await;
         }
         Ok::<_, anyhow::Error>(())
     });

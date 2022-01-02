@@ -290,7 +290,7 @@ impl Db {
         ))
     }
 
-    pub fn create(&self) -> anyhow::Result<()> {
+    pub fn create(&self) -> anyhow::Result<bool> {
         let connection = self.grab_lock();
 
         connection.execute(
@@ -339,6 +339,9 @@ impl Db {
             [],
         )?;
 
-        Ok(())
+        let r: Option<u32> = connection
+            .query_row("SELECT 1 FROM addresses", [], |r| r.get(0)).optional()?;
+
+        Ok(r.is_some())
     }
 }
