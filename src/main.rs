@@ -23,7 +23,7 @@ struct Args {
     rescan: bool,
 }
 
-pub const NETWORK: Network = Network::MainNetwork;
+pub const NETWORK: Network = Network::YCashMainNetwork;
 
 // They come from the config file
 //

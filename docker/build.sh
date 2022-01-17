@@ -2,4 +2,4 @@
 
 # Call this script from root directory!
 
-docker build -t zcash-walletd -f docker/Dockerfile .
+docker build -t ycash-walletd -f docker/Dockerfile .

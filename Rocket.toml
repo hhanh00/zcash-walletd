@@ -1,8 +1,8 @@
 [global]
-db_path = "/data/zec-wallet-main.db"
+db_path = "/data/yec-wallet-main.db"
 confirmations = 6
-lwd_url = "https://mainnet.lightwalletd.com:9067"
-notify_tx_url = "http://btcp:9000/zcashlikedaemoncallback/tx?cryptoCode=zec&hash="
+lwd_url = "https://lite.ycash.xyz:9067"
+notify_tx_url = "http://btcp:9000/zcashlikedaemoncallback/tx?cryptoCode=yec&hash="
 poll_interval = 60
 
 [debug]

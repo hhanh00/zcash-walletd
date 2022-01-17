@@ -5,15 +5,28 @@ Primary intended to work with the BTCPayServer payment gateway,
 it offers a REST interface that can be useful in other scenarios.
 
 For instance, it implements a subset of the `monero-wallet` API,
-which allows it to be used interchangeably.
+which allows it to be used interchangeably in some cases.
 
 ## Features
 
-- `zcash-walletd` maps accounts and subaccounts to diversified addresses,
-- Millions of accounts and sub accounts are supported without significant performance loss,
-- can be used to monitor the zcash blockchain for incoming transactions
-- can call an external URL on new transactions
-- Cold wallet - `zcash-walletd` does not use seeds or secret keys
+### Account Management
+
+Create diversified addresses on demand and map them to account # 
+and sub account #. BTCPay associates each store to an account and
+each invoice into a sub account.
+
+Millions of accounts and sub accounts are supported without significant performance loss.
+
+### Monitor the Blockchain and detect incoming payments
+
+When a customer pays an invoice, `zcash-walletd` sees the received
+notes and makes a REST/POST request to notify the payment gateway.
+
+Partial payments are supported.
+
+### Security
+
+Wallet is view only and does not contain the main account seed or secret key.
 
 ## Build
 
