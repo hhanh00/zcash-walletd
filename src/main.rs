@@ -62,10 +62,14 @@ async fn main() -> anyhow::Result<()> {
     let fvk = dotenv::var("VK")
         .context("Seed missing from .env file")
         .unwrap();
-    let fvk = decode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk).unwrap().unwrap();
+    let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
+    let fvk = decode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk).unwrap().expect("Invalid viewing key");
     let rocket = rocket::build();
     let figment = rocket.figment();
-    let config: WalletConfig = figment.extract().unwrap();
+    let mut config: WalletConfig = figment.extract().unwrap();
+    if let Some(notify_tx_url) = notify_tx_url {
+        config.notify_tx_url = notify_tx_url;
+    }
     let db = Db::new(&config.db_path, &fvk);
     let fvk = FVK(Mutex::new(fvk.clone()));
     let db_exists = db.create().unwrap();

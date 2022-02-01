@@ -2,7 +2,7 @@
 db_path = "/data/zec-wallet-test.db"
 confirmations = 6
 lwd_url = "https://testnet.lightwalletd.com:9067"
-notify_tx_url = "http://host.docker.internal:9000/zcashlikedaemoncallback/tx?cryptoCode=zec&hash="
+notify_tx_url = "http://btcpayserver:9000/zcashlikedaemoncallback/tx?cryptoCode=zec&hash="
 poll_interval = 60
 
 [debug]
@@ -10,4 +10,3 @@ address = "127.0.0.1"
 
 [release]
 address = "0.0.0.0"
-

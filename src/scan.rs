@@ -168,6 +168,7 @@ pub fn to_output_description(co: &CompactOutput) -> CompactOutputDescription {
 
 pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, height: u32, tx_id: TxId,
                               tx_position: usize, vk: &ViewingKey, ivk: &SaplingIvk, nf_map: &HashMap<[u8; 32], u32>) -> anyhow::Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
+    log::info!("Scan tx id: {}", tx_id);
     let raw_tx = client.get_transaction(Request::new(TxFilter {
         block: None,
         index: 0,
