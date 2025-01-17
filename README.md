@@ -39,6 +39,8 @@ Wallet is view only and does not contain the main account seed or secret key.
 - `zcash-walletd` looks for an environment variable `VK` that must contains the viewing key of the wallet
 - Optionally, if a `BIRTH_HEIGHT` variable is present it will indicate the starting scan height
 - `BIRTH_HEIGHT` is only used for the initial sync
+- `LWD_URL` is used to configure the `lightwalletd` server
+- `CONFIRMATIONS` is the number of blocks to wait for until confirming a payment. Defaults to 6
 
 ## Command line args
 

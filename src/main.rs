@@ -23,7 +23,8 @@ struct Args {
     rescan: bool,
 }
 
-pub const NETWORK: Network = Network::TestNetwork;
+// pub const NETWORK: Network = Network::TestNetwork;
+pub const NETWORK: Network = Network::MainNetwork;
 
 // They come from the config file
 //
@@ -62,13 +63,21 @@ async fn main() -> anyhow::Result<()> {
     let fvk = dotenv::var("VK")
         .context("Seed missing from .env file")
         .unwrap();
+    let lwd_url = dotenv::var("LWD_URL").ok();
     let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
+    let confirmations = dotenv::var("CONFIRMATIONS").ok().map(|c| u32::from_str(&c).unwrap());
     let fvk = decode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk).unwrap().expect("Invalid viewing key");
     let rocket = rocket::build();
     let figment = rocket.figment();
     let mut config: WalletConfig = figment.extract().unwrap();
     if let Some(notify_tx_url) = notify_tx_url {
         config.notify_tx_url = notify_tx_url;
+    }
+    if let Some(lwd_url) = lwd_url {
+        config.lwd_url = lwd_url;
+    }
+    if let Some(confirmations) = confirmations {
+        config.confirmations = confirmations;
     }
     let db = Db::new(&config.db_path, &fvk);
     let fvk = FVK(Mutex::new(fvk.clone()));
