@@ -1,10 +1,11 @@
 use crate::account::{Account, AccountBalance, SubAccount};
 use crate::NETWORK;
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use sapling_crypto::zip32::ExtendedFullViewingKey;
 use std::sync::{Mutex, MutexGuard};
 use zcash_client_backend::encoding::encode_payment_address;
-use zcash_primitives::consensus::{Parameters, NetworkUpgrade};
-use zcash_primitives::zip32::{DiversifierIndex, ExtendedFullViewingKey};
+use zcash_primitives::consensus::{NetworkConstants as _, NetworkUpgrade, Parameters};
+use zcash_primitives::zip32::DiversifierIndex;
 use crate::scan::DecryptedNote;
 use std::collections::HashMap;
 use crate::transaction::{Transfer, SubAddress};
@@ -267,22 +268,21 @@ impl Db {
         let (next_index, pa) = if let Some(diversifier) = diversifier {
             let mut di = [0u8; 11];
             di[0..8].copy_from_slice(&diversifier.to_le_bytes());
-            let mut index = DiversifierIndex(di);
+            let mut index = DiversifierIndex::from(di);
             index
                 .increment()
                 .map_err(|_| anyhow::anyhow!("Out of diversified addresses"))?;
-            let (index, pa) = self
+            let pa = self
                 .fvk
                 .address(index)
-                .map_err(|_| anyhow::anyhow!("Could not derive new subaccount"))?;
+                .ok_or_else(|| anyhow::anyhow!("Could not derive new subaccount"))?;
             (index, pa)
         } else {
             self.fvk
                 .default_address()
-                .map_err(|_| anyhow::anyhow!("Cannot get default address"))?
         };
         let mut di = [0u8; 8];
-        di.copy_from_slice(&next_index.0[0..8]);
+        di.copy_from_slice(&next_index.as_bytes()[0..8]);
         let next_index = u64::from_le_bytes(di);
         Ok((
             next_index,
