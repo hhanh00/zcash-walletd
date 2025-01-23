@@ -1,21 +1,21 @@
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
+use sapling_crypto::keys::PreparedIncomingViewingKey;
+use sapling_crypto::note::ExtractedNoteCommitment;
+use sapling_crypto::note_encryption::{try_sapling_compact_note_decryption, try_sapling_note_decryption, CompactOutputDescription};
+use sapling_crypto::zip32::ExtendedFullViewingKey;
+use sapling_crypto::{Node, ViewingKey, NOTE_COMMITMENT_TREE_DEPTH};
 use tonic::Request;
-use zcash_primitives::zip32::ExtendedFullViewingKey;
-use zcash_primitives::transaction::components::sapling::CompactOutputDescription;
+use zcash_primitives::merkle_tree::read_commitment_tree;
+use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use crate::NETWORK;
-use zcash_primitives::sapling::note_encryption::{try_sapling_compact_note_decryption, try_sapling_note_decryption};
-use zcash_primitives::consensus::{BlockHeight, Parameters};
-use zcash_primitives::sapling::{SaplingIvk, Node, ViewingKey};
-use group::GroupEncoding;
-use ff::PrimeField;
-use zcash_primitives::merkle_tree::CommitmentTree;
+use zcash_primitives::consensus::{BlockHeight, BranchId, NetworkConstants as _};
 use zcash_client_backend::encoding::encode_payment_address;
 use tokio::sync::mpsc::{Sender, channel};
 use zcash_primitives::transaction::{TxId, Transaction};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use tonic::transport::Channel;
-use zcash_primitives::memo::Memo;
+use zcash_primitives::memo::{Memo, MemoBytes};
 use std::convert::TryFrom;
 use std::collections::HashMap;
 use rocket::futures::{FutureExt, future};
@@ -67,7 +67,7 @@ pub async fn scan_blocks(start_height: u32, lwd_url: &str, fvk: &ExtendedFullVie
     if start_height <= latest_height {
         let tree_state = client.get_tree_state(Request::new(start_block_id)).await?.into_inner();
         let commitment_tree = hex::decode(tree_state.tree)?;
-        let commitment_tree = CommitmentTree::<Node>::read(&*commitment_tree)?;
+        let commitment_tree = read_commitment_tree::<Node, _, NOTE_COMMITMENT_TREE_DEPTH>(&*commitment_tree)?;
         let mut current_position = commitment_tree.size();
         log::info!("Scanning from {} to {}", start_height, latest_height);
         let mut block_stream = client
@@ -129,17 +129,19 @@ async fn scan_one_block(block: &CompactBlock, fvk: &ExtendedFullViewingKey, star
     // println!("{}", block.height);
     let vk = fvk.fvk.vk.clone();
     let ivk = vk.ivk();
+    let pivk = PreparedIncomingViewingKey::new(&ivk);
     let height = BlockHeight::from_u32(block.height as u32);
     let mut count_notes = 0;
+    let zip32_enforcement = zip212_enforcement(&NETWORK, height);
     for transaction in block.vtx.iter() {
         for cout in transaction.outputs.iter() {
             let co = to_output_description(cout);
-            if try_sapling_compact_note_decryption(&NETWORK, height, &ivk, &co).is_some() {
+            if try_sapling_compact_note_decryption(&pivk, &co, zip32_enforcement).is_some() {
                 let mut tx_id = [0u8; 32];
                 tx_id.copy_from_slice(&transaction.hash);
                 let tx_index = TxIndex {
                     height: block.height as u32,
-                    tx_id: TxId(tx_id),
+                    tx_id: TxId::from_bytes(tx_id),
                     position: start_position + count_notes,
                 };
                 tx.send(ScannerOutput::TxIndex(tx_index)).await?;
@@ -154,64 +156,71 @@ async fn scan_one_block(block: &CompactBlock, fvk: &ExtendedFullViewingKey, star
 pub fn to_output_description(co: &CompactOutput) -> CompactOutputDescription {
     let mut cmu = [0u8; 32];
     cmu.copy_from_slice(&co.cmu);
-    let cmu = bls12_381::Scalar::from_repr(cmu).unwrap();
     let mut epk = [0u8; 32];
     epk.copy_from_slice(&co.epk);
-    let epk = jubjub::ExtendedPoint::from_bytes(&epk).unwrap();
+    let mut enc_ciphertext = [0u8; 52];
+    enc_ciphertext.copy_from_slice(&co.ciphertext);
     let od = CompactOutputDescription {
-        epk,
-        cmu,
-        enc_ciphertext: co.ciphertext.to_vec(),
+        ephemeral_key: epk.into(),
+        cmu: ExtractedNoteCommitment::from_bytes(&cmu).unwrap(),
+        enc_ciphertext,
     };
     od
 }
 
 pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, height: u32, tx_id: TxId,
-                              tx_position: usize, vk: &ViewingKey, ivk: &SaplingIvk, nf_map: &HashMap<[u8; 32], u32>) -> anyhow::Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
+                              tx_position: usize, vk: &ViewingKey, pivk: &PreparedIncomingViewingKey, nf_map: &HashMap<[u8; 32], u32>) -> anyhow::Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
     log::info!("Scan tx id: {}", tx_id);
     let raw_tx = client.get_transaction(Request::new(TxFilter {
         block: None,
         index: 0,
-        hash: tx_id.0.to_vec(),
+        hash: tx_id.as_ref().to_vec(),
     })).await?.into_inner();
-    let tx = Transaction::read(&*raw_tx.data)?;
+    let branch_id = BranchId::for_height(&NETWORK, BlockHeight::from_u32(height));
+    let tx = Transaction::read(&*raw_tx.data, branch_id)?;
+    let txid = tx.txid().clone();
+    let tx = tx.into_data();
 
+    let zip32_enforcement = zip212_enforcement(&NETWORK, BlockHeight::from_u32(height));
     let mut spends: Vec<u32> = vec![];
     let mut outputs: Vec<DecryptedNote> = vec![];
 
-    for sd in tx.shielded_spends.iter() {
-        if let Some(id_note) = nf_map.get(&sd.nullifier.0) {
-            spends.push(*id_note);
+    if let Some(sapling_bundle) = tx.sapling_bundle() {
+        for sd in sapling_bundle.shielded_spends() {
+            if let Some(id_note) = nf_map.get(sd.nullifier().as_ref()) {
+                spends.push(*id_note);
+            }
+        }
+
+        for (index, od) in sapling_bundle.shielded_outputs().iter().enumerate() {
+            if let Some((note, pa, memo)) = try_sapling_note_decryption(pivk, od, zip32_enforcement) {
+                let memo_bytes = MemoBytes::from_bytes(&memo).unwrap();
+                let memo: Memo = Memo::try_from(memo_bytes)?;
+                let memo = match memo {
+                    Memo::Text(text) => text.to_string(),
+                    _ => "".to_string(),
+                };
+                let diversifier: [u8; 11] = pa.diversifier().0;
+                let rcm = note.rcm().to_bytes();
+                let position = tx_position + index;
+                let nf = note.nf(&vk.nk, position as u64);
+                let note = DecryptedNote {
+                    address: encode_payment_address(NETWORK.hrp_sapling_payment_address(), &pa),
+                    height,
+                    position,
+                    diversifier,
+                    value: note.value().inner(),
+                    rcm,
+                    nf: nf.0,
+                    memo,
+                };
+                outputs.push(note);
+            }
         }
     }
 
-    for (index, od) in tx.shielded_outputs.iter().enumerate() {
-        if let Some((note, pa, memo)) = try_sapling_note_decryption(&NETWORK, BlockHeight::from_u32(height), ivk, od) {
-            let memo: Memo = Memo::try_from(memo)?;
-            let memo = match memo {
-                Memo::Text(text) => text.to_string(),
-                _ => "".to_string(),
-            };
-            let diversifier: [u8; 11] = pa.diversifier().0;
-            let rcm = note.rcm().to_repr();
-            let position = tx_position + index;
-            let nf = note.nf(vk, position as u64);
-            let note = DecryptedNote {
-                address: encode_payment_address(NETWORK.hrp_sapling_payment_address(), &pa),
-                height,
-                position,
-                diversifier,
-                value: note.value,
-                rcm,
-                nf: nf.0,
-                memo,
-            };
-            outputs.push(note);
-        }
-    }
-
-    log::info!("TXID: {}", tx.txid());
-    let value = i64::from(tx.value_balance);
+    log::info!("TXID: {}", txid);
+    let value = i64::try_from(tx.sapling_value_balance()).unwrap();
     Ok((spends, outputs, value))
 }
 

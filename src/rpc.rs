@@ -4,14 +4,14 @@ use crate::transaction::Transfer;
 use rocket::response::Debug;
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::State;
+use sapling_crypto::keys::PreparedIncomingViewingKey;
+use sapling_crypto::zip32::ExtendedFullViewingKey;
 use crate::scan::{scan_blocks, scan_transaction, get_latest_height};
 use crate::{FVK, from_tonic, WalletConfig};
 use tokio_stream::StreamExt;
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
-use zcash_primitives::zip32::ExtendedFullViewingKey;
 use tonic::Request;
 use crate::lwd_rpc::*;
-use zcash_primitives::transaction::components::amount::DEFAULT_FEE;
 use crate::scan::{ScannerOutput, ScanError};
 
 #[derive(Serialize, Deserialize)]
@@ -167,10 +167,15 @@ pub struct GetFeeEstimateResponse {
     pub fee: u64,
 }
 
+// Roughly estimate at 2 transparent in/out + 2 shielded in/out
+// We cannot implement ZIP-321 here because we don't have
+// the transaction
+const LOGICAL_ACTION_FEE: u64 = 5000u64;
+
 #[post("/get_fee_estimate", data = "<_request>")]
 pub fn get_fee_estimate(_request: Json<GetFeeEstimateRequest>) -> Result<Json<GetFeeEstimateResponse>, Debug<anyhow::Error>> {
     let rep = GetFeeEstimateResponse {
-        fee: u64::from(DEFAULT_FEE),
+        fee: 4 * LOGICAL_ACTION_FEE,
     };
     Ok(Json(rep))
 }
@@ -250,6 +255,7 @@ pub async fn request_scan(
 pub async fn scan(fvk: ExtendedFullViewingKey, start_height: Option<u32>, db: &State<Db>, config: &State<WalletConfig>) -> anyhow::Result<()> {
     let vk = fvk.fvk.vk.clone();
     let ivk = vk.ivk();
+    let pivk = PreparedIncomingViewingKey::new(&ivk);
 
     let start_height = match start_height {
         Some(h) => h,
@@ -264,8 +270,8 @@ pub async fn scan(fvk: ExtendedFullViewingKey, start_height: Option<u32>, db: &S
     while let Some(scan_output) = tx_stream.next().await {
         match scan_output {
             ScannerOutput::TxIndex(tx_index) => {
-                let (spends, outputs, value) = scan_transaction(&mut client, tx_index.height, tx_index.tx_id, tx_index.position, &vk, &ivk, &nf_map).await?;
-                let id_tx = db.store_tx(&tx_index.tx_id.0, tx_index.height, value)?;
+                let (spends, outputs, value) = scan_transaction(&mut client, tx_index.height, tx_index.tx_id, tx_index.position, &vk, &pivk, &nf_map).await?;
+                let id_tx = db.store_tx(tx_index.tx_id.as_ref(), tx_index.height, value)?;
                 for id_note in spends.iter() {
                     db.mark_spent(*id_note, id_tx)?;
                 }
@@ -273,7 +279,7 @@ pub async fn scan(fvk: ExtendedFullViewingKey, start_height: Option<u32>, db: &S
                     let id_note = db.store_note(n, id_tx)?;
                     nf_map.insert(n.nf, id_note);
                 }
-                notify_tx(&tx_index.tx_id.0, &config.notify_tx_url).await?;
+                notify_tx(tx_index.tx_id.as_ref(), &config.notify_tx_url).await?;
             }
             ScannerOutput::Block(block) => {
                 db.store_block(block.height, &block.hash)?;

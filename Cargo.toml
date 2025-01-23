@@ -1,6 +1,6 @@
 [package]
 name = "zcash-walletd"
-version = "0.1.0"
+version = "0.1.1"
 
 edition = "2021"
 
@@ -38,18 +38,26 @@ bls12_381 = "^0.4.0"
 jubjub = "^0.6"
 ff = "^0.9"
 group = "0.9.0"
+orchard = "0.3.0"
+sapling-crypto = "0.4.0"
 
 [build-dependencies]
 tonic-build = "0.4.2"
 
 [dependencies.zcash_client_backend]
-git = "https://github.com/hhanh00/librustzcash.git"
-rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"
+git = "https://github.com/zcash/librustzcash.git"
+version = "0.16.0"
+#rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"
 
 [dependencies.zcash_primitives]
-git = "https://github.com/hhanh00/librustzcash.git"
-rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"
+git = "https://github.com/zcash/librustzcash.git"
+version = "0.21.0"
+#rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"
 
 [dependencies.zcash_proofs]
-git = "https://github.com/hhanh00/librustzcash.git"
-rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"
+git = "https://github.com/zcash/librustzcash.git"
+version = "0.21.0"
+#rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"
+
+[patch.crates-io]
+orchard = { git = "https://github.com/zcash/orchard.git", rev = "cd3e0901ccac2c630dd7fd03eb496d5030c1bbfe" }
