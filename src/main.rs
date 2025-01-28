@@ -12,7 +12,8 @@ mod transaction;
 
 use std::str::FromStr;
 pub use crate::rpc::*;
-use zcash_primitives::consensus::{Network, Parameters};
+use sapling_crypto::zip32::ExtendedFullViewingKey;
+use zcash_primitives::consensus::{Network, NetworkConstants as _};
 
 use clap::Parser;
 
@@ -35,7 +36,6 @@ pub const NETWORK: Network = Network::TestNetwork;
 
 use crate::db::Db;
 use anyhow::Context;
-use zcash_primitives::zip32::ExtendedFullViewingKey;
 use std::sync::Mutex;
 use zcash_client_backend::encoding::decode_extended_full_viewing_key;
 use crate::scan::monitor_task;
@@ -63,7 +63,7 @@ async fn main() -> anyhow::Result<()> {
         .context("Seed missing from .env file")
         .unwrap();
     let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
-    let fvk = decode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk).unwrap().expect("Invalid viewing key");
+    let fvk = decode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk).expect("Invalid viewing key");
     let rocket = rocket::build();
     let figment = rocket.figment();
     let mut config: WalletConfig = figment.extract().unwrap();
