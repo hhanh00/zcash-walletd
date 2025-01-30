@@ -160,12 +160,12 @@ pub fn to_output_description(co: &CompactOutput) -> CompactOutputDescription {
     epk.copy_from_slice(&co.epk);
     let mut enc_ciphertext = [0u8; 52];
     enc_ciphertext.copy_from_slice(&co.ciphertext);
-    let od = CompactOutputDescription {
+    
+    CompactOutputDescription {
         ephemeral_key: epk.into(),
         cmu: ExtractedNoteCommitment::from_bytes(&cmu).unwrap(),
         enc_ciphertext,
-    };
-    od
+    }
 }
 
 pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, height: u32, tx_id: TxId,
@@ -178,7 +178,7 @@ pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, hei
     })).await?.into_inner();
     let branch_id = BranchId::for_height(&NETWORK, BlockHeight::from_u32(height));
     let tx = Transaction::read(&*raw_tx.data, branch_id)?;
-    let txid = tx.txid().clone();
+    let txid = tx.txid();
     let tx = tx.into_data();
 
     let zip32_enforcement = zip212_enforcement(&NETWORK, BlockHeight::from_u32(height));
@@ -220,7 +220,7 @@ pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, hei
     }
 
     log::info!("TXID: {}", txid);
-    let value = i64::try_from(tx.sapling_value_balance()).unwrap();
+    let value = i64::from(tx.sapling_value_balance());
     Ok((spends, outputs, value))
 }
 
