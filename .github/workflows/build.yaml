@@ -46,5 +46,7 @@ jobs:
     - name: Build
       run: cargo build
     - name: Run
+      env:
+        RUST_LOG: info
       run: cargo run
 
