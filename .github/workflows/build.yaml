@@ -15,5 +15,17 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: install zcashd
+      run: |
+        sudo apt-get update && sudo apt-get install apt-transport-https wget gnupg2
+        wget -qO - https://apt.z.cash/zcash.asc | gpg --import
+        gpg --export B1C9095EAA1848DBB54D9DDA1D05FDC66B372CFE | sudo tee  /etc/apt/trusted.gpg.d/zcash.gpg >/dev/null
+        echo "deb [trusted=yes] https://apt.z.cash/ bullseye main" | sudo tee /etc/apt/sources.list.d/zcash.list
+        sudo apt-get update && sudo apt-get install zcash
+    - name: setup regtest
+      run: |
+        mkdir regtest
+        cp docs/zcash.conf regtest/
+        ./docs/setup-regtest.sh
     - name: Build
       run: cargo build
