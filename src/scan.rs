@@ -1,4 +1,5 @@
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
+use crate::network::Network;
 use sapling_crypto::keys::PreparedIncomingViewingKey;
 use sapling_crypto::note::ExtractedNoteCommitment;
 use sapling_crypto::note_encryption::{try_sapling_compact_note_decryption, try_sapling_note_decryption, CompactOutputDescription};
@@ -7,7 +8,6 @@ use sapling_crypto::{Node, ViewingKey, NOTE_COMMITMENT_TREE_DEPTH};
 use tonic::Request;
 use zcash_primitives::merkle_tree::read_commitment_tree;
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
-use crate::NETWORK;
 use zcash_primitives::consensus::{BlockHeight, BranchId, NetworkConstants as _};
 use zcash_client_backend::encoding::encode_payment_address;
 use tokio::sync::mpsc::{Sender, channel};
@@ -55,7 +55,7 @@ pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) ->
     Ok(latest_height as u32)
 }
 
-pub async fn scan_blocks(start_height: u32, lwd_url: &str, fvk: &ExtendedFullViewingKey, mut prev_block_hash: Option<[u8; 32]>)
+pub async fn scan_blocks(network: Network, start_height: u32, lwd_url: &str, fvk: &ExtendedFullViewingKey, mut prev_block_hash: Option<[u8; 32]>)
     -> anyhow::Result<(impl Stream<Item=ScannerOutput>, BoxFuture<'static, anyhow::Result<()>>)> {
     let mut client = CompactTxStreamerClient::connect(lwd_url.to_string()).await?;
     let latest_height = get_latest_height(&mut client).await?;
@@ -94,7 +94,7 @@ pub async fn scan_blocks(start_height: u32, lwd_url: &str, fvk: &ExtendedFullVie
                         return Err(ScanError::Reorganization.into());
                     }
                 }
-                let count_notes = scan_one_block(&block, &fvk2, current_position, &scan_sender).await?;
+                let count_notes = scan_one_block(&network, &block, &fvk2, current_position, &scan_sender).await?;
                 current_position += count_notes;
                 let mut b = Block {
                     height: block.height as u32,
@@ -125,14 +125,14 @@ pub struct DecryptedNote {
     pub memo: String,
 }
 
-async fn scan_one_block(block: &CompactBlock, fvk: &ExtendedFullViewingKey, start_position: usize, tx: &Sender<ScannerOutput>) -> anyhow::Result<usize> {
+async fn scan_one_block(network: &Network, block: &CompactBlock, fvk: &ExtendedFullViewingKey, start_position: usize, tx: &Sender<ScannerOutput>) -> anyhow::Result<usize> {
     // println!("{}", block.height);
     let vk = fvk.fvk.vk.clone();
     let ivk = vk.ivk();
     let pivk = PreparedIncomingViewingKey::new(&ivk);
     let height = BlockHeight::from_u32(block.height as u32);
     let mut count_notes = 0;
-    let zip32_enforcement = zip212_enforcement(&NETWORK, height);
+    let zip32_enforcement = zip212_enforcement(network, height);
     for transaction in block.vtx.iter() {
         for cout in transaction.outputs.iter() {
             let co = to_output_description(cout);
@@ -168,7 +168,7 @@ pub fn to_output_description(co: &CompactOutput) -> CompactOutputDescription {
     }
 }
 
-pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, height: u32, tx_id: TxId,
+pub async fn scan_transaction(network: &Network, client: &mut CompactTxStreamerClient<Channel>, height: u32, tx_id: TxId,
                               tx_position: usize, vk: &ViewingKey, pivk: &PreparedIncomingViewingKey, nf_map: &HashMap<[u8; 32], u32>) -> anyhow::Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
     log::info!("Scan tx id: {}", tx_id);
     let raw_tx = client.get_transaction(Request::new(TxFilter {
@@ -176,12 +176,12 @@ pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, hei
         index: 0,
         hash: tx_id.as_ref().to_vec(),
     })).await?.into_inner();
-    let branch_id = BranchId::for_height(&NETWORK, BlockHeight::from_u32(height));
+    let branch_id = BranchId::for_height(network, BlockHeight::from_u32(height));
     let tx = Transaction::read(&*raw_tx.data, branch_id)?;
     let txid = tx.txid();
     let tx = tx.into_data();
 
-    let zip32_enforcement = zip212_enforcement(&NETWORK, BlockHeight::from_u32(height));
+    let zip32_enforcement = zip212_enforcement(network, BlockHeight::from_u32(height));
     let mut spends: Vec<u32> = vec![];
     let mut outputs: Vec<DecryptedNote> = vec![];
 
@@ -205,7 +205,7 @@ pub async fn scan_transaction(client: &mut CompactTxStreamerClient<Channel>, hei
                 let position = tx_position + index;
                 let nf = note.nf(&vk.nk, position as u64);
                 let note = DecryptedNote {
-                    address: encode_payment_address(NETWORK.hrp_sapling_payment_address(), &pa),
+                    address: encode_payment_address(network.hrp_sapling_payment_address(), &pa),
                     height,
                     position,
                     diversifier,
