@@ -48,5 +48,6 @@ jobs:
     - name: Run
       env:
         RUST_LOG: info
-      run: cargo run
-
+      run: |
+        ./target/debug/zcash-walletd &
+        sleep 30
