@@ -42,6 +42,7 @@ jobs:
         cp docs/zcash.conf regtest/
         ./docs/setup-regtest.sh
         lightwalletd --no-tls-very-insecure --zcash-conf-path regtest/zcash.conf --data-dir regtest --grpc-bind-addr 0.0.0.0:9067 &
+        cp sample-env .env
     - name: Build
       run: cargo build
     - name: Run
