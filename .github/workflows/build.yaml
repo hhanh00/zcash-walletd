@@ -22,7 +22,6 @@ jobs:
         gpg --export B1C9095EAA1848DBB54D9DDA1D05FDC66B372CFE | sudo tee  /etc/apt/trusted.gpg.d/zcash.gpg >/dev/null
         echo "deb [trusted=yes] https://apt.z.cash/ bullseye main" | sudo tee /etc/apt/sources.list.d/zcash.list
         sudo apt-get update && sudo apt-get install zcash
-        popd
     - name: setup regtest
       run: |
         mkdir regtest
