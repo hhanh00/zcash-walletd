@@ -1,5 +1,5 @@
 use crate::account::{Account, AccountBalance, SubAccount};
-use crate::NETWORK;
+use crate::network::Network;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use sapling_crypto::zip32::ExtendedFullViewingKey;
 use std::sync::{Mutex, MutexGuard};
@@ -11,13 +11,15 @@ use std::collections::HashMap;
 use crate::transaction::{Transfer, SubAddress};
 
 pub struct Db {
+    network: Network,
     connection: Mutex<Connection>,
     fvk: ExtendedFullViewingKey,
 }
 
 impl Db {
-    pub fn new(db_path: &str, fvk: &ExtendedFullViewingKey) -> Self {
+    pub fn new(network: Network, db_path: &str, fvk: &ExtendedFullViewingKey) -> Self {
         Db {
+            network,
             connection: Mutex::new(Connection::open(db_path).unwrap()),
             fvk: fvk.clone(),
         }
@@ -142,7 +144,7 @@ impl Db {
 
         let height = connection.query_row("SELECT MAX(height) FROM blocks", [], |row| {
             let h: Option<u32> = row.get(0)?;
-            let height = h.unwrap_or_else(|| u32::from(NETWORK.activation_height(NetworkUpgrade::Sapling).unwrap()));
+            let height = h.unwrap_or_else(|| u32::from(self.network.activation_height(NetworkUpgrade::Sapling).unwrap()));
             Ok(height)
         })?;
         Ok(height)
@@ -286,7 +288,7 @@ impl Db {
         let next_index = u64::from_le_bytes(di);
         Ok((
             next_index,
-            encode_payment_address(NETWORK.hrp_sapling_payment_address(), &pa),
+            encode_payment_address(self.network.hrp_sapling_payment_address(), &pa),
         ))
     }
 
