@@ -26,12 +26,6 @@ struct Args {
     rescan: bool,
 }
 
-<<<<<<< HEAD
-// pub const NETWORK: Network = Network::TestNetwork;
-pub const NETWORK: Network = Network::MainNetwork;
-
-=======
->>>>>>> upstream/main
 // They come from the config file
 //
 // const DB_PATH: &str = "zec-wallet.db";
