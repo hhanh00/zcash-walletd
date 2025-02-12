@@ -49,6 +49,15 @@ git = "https://github.com/zcash/librustzcash.git"
 version = "0.16.0"
 #rev = "1518b145f8ee67e144fa8337c7dfd4c8cff899c9"
 
+[dependencies.zcash_protocol]
+git = "https://github.com/zcash/librustzcash.git"
+version = "0.4.3"
+features = ["local-consensus"]
+
+[dependencies.zcash_address]
+git = "https://github.com/zcash/librustzcash.git"
+version = "0.6.2"
+
 [dependencies.zcash_primitives]
 git = "https://github.com/zcash/librustzcash.git"
 version = "0.21.0"

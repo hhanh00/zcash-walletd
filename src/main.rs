@@ -4,6 +4,7 @@ extern crate rocket;
 #[path = "generated/cash.z.wallet.sdk.rpc.rs"]
 pub mod lwd_rpc;
 
+mod network;
 mod account;
 mod db;
 mod rpc;
@@ -12,10 +13,11 @@ mod transaction;
 
 use std::str::FromStr;
 pub use crate::rpc::*;
+use network::Network;
 use sapling_crypto::zip32::ExtendedFullViewingKey;
-use zcash_primitives::consensus::{Network, NetworkConstants as _};
 
 use clap::Parser;
+use zcash_protocol::consensus::NetworkConstants as _;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -24,9 +26,12 @@ struct Args {
     rescan: bool,
 }
 
+<<<<<<< HEAD
 // pub const NETWORK: Network = Network::TestNetwork;
 pub const NETWORK: Network = Network::MainNetwork;
 
+=======
+>>>>>>> upstream/main
 // They come from the config file
 //
 // const DB_PATH: &str = "zec-wallet.db";
@@ -53,6 +58,19 @@ pub struct WalletConfig {
     lwd_url: String,
     notify_tx_url: String,
     poll_interval: u16,
+    regtest: bool,
+}
+
+impl WalletConfig {
+    pub fn network(&self) -> Network {
+        let network = if self.regtest {
+            Network::Regtest
+        }
+        else {
+            Network::Main
+        };
+        network
+    }
 }
 
 #[rocket::main]
@@ -60,16 +78,18 @@ async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
     let args: Args = Args::parse();
-    let fvk = dotenv::var("VK")
-        .context("Seed missing from .env file")
-        .unwrap();
-    let lwd_url = dotenv::var("LWD_URL").ok();
-    let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
-    let confirmations = dotenv::var("CONFIRMATIONS").ok().map(|c| u32::from_str(&c).unwrap());
-    let fvk = decode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk).expect("Invalid viewing key");
     let rocket = rocket::build();
     let figment = rocket.figment();
     let mut config: WalletConfig = figment.extract().unwrap();
+    let fvk = dotenv::var("VK")
+        .context("Seed missing from .env file")
+        .unwrap();
+    let network = config.network();
+
+    let lwd_url = dotenv::var("LWD_URL").ok();
+    let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
+    let confirmations = dotenv::var("CONFIRMATIONS").ok().map(|c| u32::from_str(&c).unwrap());
+    let fvk = decode_extended_full_viewing_key(network.hrp_sapling_extended_full_viewing_key(), &fvk).expect("Invalid viewing key");
     if let Some(notify_tx_url) = notify_tx_url {
         config.notify_tx_url = notify_tx_url;
     }
@@ -79,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(confirmations) = confirmations {
         config.confirmations = confirmations;
     }
-    let db = Db::new(&config.db_path, &fvk);
+    let db = Db::new(network, &config.db_path, &fvk);
     let fvk = FVK(Mutex::new(fvk.clone()));
     let db_exists = db.create().unwrap();
     if !db_exists {
@@ -121,5 +141,3 @@ fn to_tonic<E: ToString>(e: E) -> tonic::Status {
 fn from_tonic<E: ToString>(e: E) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
 }
-
-// TODO: Detect reorgs

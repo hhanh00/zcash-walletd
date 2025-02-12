@@ -24,7 +24,6 @@ pub struct AccountBalance {
 #[cfg(test)]
 mod tests {
     use crate::account::Account;
-    use crate::NETWORK;
     use bip39::{Language, Mnemonic, Seed};
     use zcash_client_backend::encoding::{
         encode_extended_full_viewing_key, encode_extended_spending_key, encode_payment_address,
@@ -34,23 +33,24 @@ mod tests {
 
     #[allow(dead_code)]
     fn derive_account(phrase: &str, account_index: u32) -> anyhow::Result<Account> {
+        let network = crate::network::Network::Regtest;
         let mnemonic = Mnemonic::from_phrase(&phrase, Language::English)?;
         let seed = Seed::new(&mnemonic, "");
         let master = ExtendedSpendingKey::master(seed.as_bytes());
         let path = [
             ChildIndex::hardened(32),
-            ChildIndex::hardened(NETWORK.coin_type()),
+            ChildIndex::hardened(network.coin_type()),
             ChildIndex::hardened(account_index),
         ];
         let extsk = ExtendedSpendingKey::from_path(&master, &path);
-        let esk = encode_extended_spending_key(NETWORK.hrp_sapling_extended_spending_key(), &extsk);
+        let esk = encode_extended_spending_key(network.hrp_sapling_extended_spending_key(), &extsk);
         #[allow(deprecated)]
         let fvk = extsk.to_extended_full_viewing_key();
         let (_, pa) = fvk
             .default_address();
         let efvk =
-            encode_extended_full_viewing_key(NETWORK.hrp_sapling_extended_full_viewing_key(), &fvk);
-        let address = encode_payment_address(NETWORK.hrp_sapling_payment_address(), &pa);
+            encode_extended_full_viewing_key(network.hrp_sapling_extended_full_viewing_key(), &fvk);
+        let address = encode_payment_address(network.hrp_sapling_payment_address(), &pa);
 
         println!("{} {}", esk, efvk);
 

@@ -15,5 +15,39 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: setup lightwalletd
+      uses: actions/checkout@v4
+      with:
+          repository: zcash/lightwalletd
+          path: lightwalletd
+    - name: setup go
+      uses: actions/setup-go@v5
+      with:
+        go-version: 1.23
+    - name: build lightwalletd
+      run: |
+        cd lightwalletd
+        make
+    - name: install zcashd
+      run: |
+        sudo apt-get update && sudo apt-get install apt-transport-https wget gnupg2
+        wget -qO - https://apt.z.cash/zcash.asc | gpg --import
+        gpg --export B1C9095EAA1848DBB54D9DDA1D05FDC66B372CFE | sudo tee  /etc/apt/trusted.gpg.d/zcash.gpg >/dev/null
+        echo "deb [trusted=yes] https://apt.z.cash/ bullseye main" | sudo tee /etc/apt/sources.list.d/zcash.list
+        sudo apt-get update && sudo apt-get install zcash
+        echo "$GITHUB_WORKSPACE/lightwalletd" >> $GITHUB_PATH
+    - name: setup regtest
+      run: |
+        mkdir regtest
+        cp docs/zcash.conf regtest/
+        ./docs/setup-regtest.sh
+        lightwalletd --no-tls-very-insecure --zcash-conf-path regtest/zcash.conf --data-dir regtest --grpc-bind-addr 0.0.0.0:9067 &
+        cp sample.env .env
     - name: Build
       run: cargo build
+    - name: Run
+      env:
+        RUST_LOG: info
+      run: |
+        ./target/debug/zcash-walletd &
+        sleep 30
