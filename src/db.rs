@@ -1,14 +1,14 @@
 use crate::account::{Account, AccountBalance, SubAccount};
 use crate::network::Network;
+use crate::scan::DecryptedNote;
+use crate::transaction::{SubAddress, Transfer};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use sapling_crypto::zip32::ExtendedFullViewingKey;
+use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard};
 use zcash_client_backend::encoding::encode_payment_address;
 use zcash_primitives::consensus::{NetworkConstants as _, NetworkUpgrade, Parameters};
 use zcash_primitives::zip32::DiversifierIndex;
-use crate::scan::DecryptedNote;
-use std::collections::HashMap;
-use crate::transaction::{Transfer, SubAddress};
 
 pub struct Db {
     network: Network,
@@ -66,7 +66,11 @@ impl Db {
         Ok(sub_account)
     }
 
-    pub fn get_accounts(&self, height: u32, confirmations: u32) -> anyhow::Result<Vec<AccountBalance>> {
+    pub fn get_accounts(
+        &self,
+        height: u32,
+        confirmations: u32,
+    ) -> anyhow::Result<Vec<AccountBalance>> {
         let connection = self.grab_lock();
         let mut s = connection.prepare(
             "WITH base AS (SELECT account, address FROM addresses WHERE sub_account = 0), \
@@ -104,15 +108,20 @@ impl Db {
     pub fn store_note(&self, note: &DecryptedNote, id_tx: u32) -> anyhow::Result<u32> {
         let connection = self.grab_lock();
 
-        let r = connection.query_row("SELECT account, sub_account FROM addresses WHERE address = ?1", [&note.address],
-        |row| {
-            let account: u32 = row.get(0)?;
-            let sub_account: u32 = row.get(1)?;
-            Ok((account, sub_account))
-        }).optional()?;
+        let r = connection
+            .query_row(
+                "SELECT account, sub_account FROM addresses WHERE address = ?1",
+                [&note.address],
+                |row| {
+                    let account: u32 = row.get(0)?;
+                    let sub_account: u32 = row.get(1)?;
+                    Ok((account, sub_account))
+                },
+            )
+            .optional()?;
         let (account, sub_account) = match r {
             Some((a, s)) => (Some(a), Some(s)),
-            None => (None, None)
+            None => (None, None),
         };
 
         connection.execute(
@@ -127,7 +136,10 @@ impl Db {
     pub fn store_tx(&self, txid: &[u8], height: u32, value: i64) -> anyhow::Result<u32> {
         let connection = self.grab_lock();
 
-        connection.execute("INSERT INTO transactions(txid, height, value) VALUES (?1,?2,?3)", params![txid, height, value])?;
+        connection.execute(
+            "INSERT INTO transactions(txid, height, value) VALUES (?1,?2,?3)",
+            params![txid, height, value],
+        )?;
         let id_tx = connection.last_insert_rowid() as u32;
         Ok(id_tx)
     }
@@ -135,7 +147,10 @@ impl Db {
     pub fn store_block(&self, height: u32, hash: &[u8]) -> anyhow::Result<()> {
         let connection = self.grab_lock();
 
-        connection.execute("INSERT INTO blocks(height, hash) VALUES (?1,?2)", params![height, hash])?;
+        connection.execute(
+            "INSERT INTO blocks(height, hash) VALUES (?1,?2)",
+            params![height, hash],
+        )?;
         Ok(())
     }
 
@@ -144,7 +159,13 @@ impl Db {
 
         let height = connection.query_row("SELECT MAX(height) FROM blocks", [], |row| {
             let h: Option<u32> = row.get(0)?;
-            let height = h.unwrap_or_else(|| u32::from(self.network.activation_height(NetworkUpgrade::Sapling).unwrap()));
+            let height = h.unwrap_or_else(|| {
+                u32::from(
+                    self.network
+                        .activation_height(NetworkUpgrade::Sapling)
+                        .unwrap(),
+                )
+            });
             Ok(height)
         })?;
         Ok(height)
@@ -153,23 +174,37 @@ impl Db {
     pub fn get_block_hash(&self, height: u32) -> anyhow::Result<Option<[u8; 32]>> {
         let connection = self.grab_lock();
 
-        let hash = connection.query_row("SELECT hash FROM blocks WHERE height = ?1", [height], |row| {
-            let hash_vec: Vec<u8> = row.get(0)?;
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(&hash_vec);
-            Ok(hash)
-        }).optional()?;
+        let hash = connection
+            .query_row(
+                "SELECT hash FROM blocks WHERE height = ?1",
+                [height],
+                |row| {
+                    let hash_vec: Vec<u8> = row.get(0)?;
+                    let mut hash = [0u8; 32];
+                    hash.copy_from_slice(&hash_vec);
+                    Ok(hash)
+                },
+            )
+            .optional()?;
         Ok(hash)
     }
 
     pub fn mark_spent(&self, id_note: u32, id_tx: u32) -> anyhow::Result<()> {
         let connection = self.grab_lock();
 
-        connection.execute("UPDATE received_notes SET spent = ?1 WHERE id_note = ?2", params![id_tx, id_note])?;
+        connection.execute(
+            "UPDATE received_notes SET spent = ?1 WHERE id_note = ?2",
+            params![id_tx, id_note],
+        )?;
         Ok(())
     }
 
-    fn row_to_transfer(row: &Row, latest_height: u32, account_index: u32, confirmations: u32) -> rusqlite::Result<Transfer> {
+    fn row_to_transfer(
+        row: &Row,
+        latest_height: u32,
+        account_index: u32,
+        confirmations: u32,
+    ) -> rusqlite::Result<Transfer> {
         let address: String = row.get(0)?;
         let value: u64 = row.get(1)?;
         let sub_account: u32 = row.get(2)?;
@@ -187,24 +222,34 @@ impl Db {
             payment_id: "".to_string(),
             subaddr_index: SubAddress {
                 major: account_index,
-                minor: sub_account
+                minor: sub_account,
             },
             suggested_confirmations_threshold: confirmations,
             timestamp: 0, // TODO: Check if needed
             txid: hex::encode(txid),
             r#type: "in".to_string(),
-            unlock_time: 0
+            unlock_time: 0,
         };
         Ok(t)
     }
 
-    pub fn get_transfers(&self, latest_height: u32, account_index: u32, sub_accounts: &[u32], confirmations: u32) -> anyhow::Result<Vec<Transfer>> {
+    pub fn get_transfers(
+        &self,
+        latest_height: u32,
+        account_index: u32,
+        sub_accounts: &[u32],
+        confirmations: u32,
+    ) -> anyhow::Result<Vec<Transfer>> {
         let connection = self.grab_lock();
 
-        let mut s = connection.prepare("SELECT address, n.value, sub_account, txid, memo, n.height \
+        let mut s = connection.prepare(
+            "SELECT address, n.value, sub_account, txid, memo, n.height \
         FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
-        account = ?1")?;
-        let rows = s.query_map([account_index], |row| Self::row_to_transfer(row, latest_height, account_index, confirmations))?;
+        account = ?1",
+        )?;
+        let rows = s.query_map([account_index], |row| {
+            Self::row_to_transfer(row, latest_height, account_index, confirmations)
+        })?;
         let mut transfers: Vec<Transfer> = vec![];
         for row in rows {
             let row = row?;
@@ -215,15 +260,25 @@ impl Db {
         Ok(transfers)
     }
 
-    pub fn get_transfers_by_txid(&self, latest_height: u32, txid: &str, account_index: u32, confirmations: u32) -> anyhow::Result<Vec<Transfer>> {
+    pub fn get_transfers_by_txid(
+        &self,
+        latest_height: u32,
+        txid: &str,
+        account_index: u32,
+        confirmations: u32,
+    ) -> anyhow::Result<Vec<Transfer>> {
         let connection = self.grab_lock();
 
         let mut txid = hex::decode(txid)?;
         txid.reverse();
-        let mut s = connection.prepare("SELECT address, n.value, sub_account, txid, memo, n.height \
+        let mut s = connection.prepare(
+            "SELECT address, n.value, sub_account, txid, memo, n.height \
         FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
-        txid = ?1")?;
-        let rows = s.query_map(params![&txid], |row| Self::row_to_transfer(row, latest_height, account_index, confirmations))?;
+        txid = ?1",
+        )?;
+        let rows = s.query_map(params![&txid], |row| {
+            Self::row_to_transfer(row, latest_height, account_index, confirmations)
+        })?;
         let mut transfers: Vec<Transfer> = vec![];
         for row in rows {
             let row = row?;
@@ -238,7 +293,10 @@ impl Db {
         connection.execute("DELETE FROM transactions WHERE height >= ?1", [height])?;
         connection.execute("DELETE FROM received_notes WHERE height >= ?1", [height])?;
         connection.execute("DELETE FROM blocks WHERE height >= ?1", [height])?;
-        connection.execute("UPDATE received_notes SET spent = NULL WHERE spent >= ?1", [height])?;
+        connection.execute(
+            "UPDATE received_notes SET spent = NULL WHERE spent >= ?1",
+            [height],
+        )?;
 
         Ok(())
     }
@@ -246,7 +304,8 @@ impl Db {
     pub fn get_nfs(&self) -> anyhow::Result<HashMap<[u8; 32], u32>> {
         let connection = self.grab_lock();
 
-        let mut s = connection.prepare("SELECT id_note, nf FROM received_notes WHERE spent IS NULL")?;
+        let mut s =
+            connection.prepare("SELECT id_note, nf FROM received_notes WHERE spent IS NULL")?;
         let nfs = s.query_map([], |row| {
             let id_note: u32 = row.get(0)?;
             let nf: Vec<u8> = row.get(1)?;
@@ -280,8 +339,7 @@ impl Db {
                 .ok_or_else(|| anyhow::anyhow!("Could not derive new subaccount"))?;
             (index, pa)
         } else {
-            self.fvk
-                .default_address()
+            self.fvk.default_address()
         };
         let mut di = [0u8; 8];
         di.copy_from_slice(&next_index.as_bytes()[0..8]);
@@ -342,7 +400,8 @@ impl Db {
         )?;
 
         let r: Option<u32> = connection
-            .query_row("SELECT 1 FROM addresses", [], |r| r.get(0)).optional()?;
+            .query_row("SELECT 1 FROM addresses", [], |r| r.get(0))
+            .optional()?;
 
         Ok(r.is_some())
     }
