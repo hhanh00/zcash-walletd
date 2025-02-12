@@ -25,11 +25,11 @@ pub struct AccountBalance {
 mod tests {
     use crate::account::Account;
     use bip39::{Language, Mnemonic, Seed};
+    use sapling_crypto::zip32::ExtendedSpendingKey;
     use zcash_client_backend::encoding::{
         encode_extended_full_viewing_key, encode_extended_spending_key, encode_payment_address,
     };
     use zcash_primitives::{consensus::NetworkConstants as _, zip32::ChildIndex};
-    use sapling_crypto::zip32::ExtendedSpendingKey;
 
     #[allow(dead_code)]
     fn derive_account(phrase: &str, account_index: u32) -> anyhow::Result<Account> {
@@ -46,8 +46,7 @@ mod tests {
         let esk = encode_extended_spending_key(network.hrp_sapling_extended_spending_key(), &extsk);
         #[allow(deprecated)]
         let fvk = extsk.to_extended_full_viewing_key();
-        let (_, pa) = fvk
-            .default_address();
+        let (_, pa) = fvk.default_address();
         let efvk =
             encode_extended_full_viewing_key(network.hrp_sapling_extended_full_viewing_key(), &fvk);
         let address = encode_payment_address(network.hrp_sapling_payment_address(), &pa);

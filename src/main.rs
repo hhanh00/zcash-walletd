@@ -4,17 +4,17 @@ extern crate rocket;
 #[path = "generated/cash.z.wallet.sdk.rpc.rs"]
 pub mod lwd_rpc;
 
-mod network;
 mod account;
 mod db;
+mod network;
 mod rpc;
 mod scan;
 mod transaction;
 
-use std::str::FromStr;
 pub use crate::rpc::*;
 use network::Network;
 use sapling_crypto::zip32::ExtendedFullViewingKey;
+use std::str::FromStr;
 
 use clap::Parser;
 use zcash_protocol::consensus::NetworkConstants as _;
@@ -35,12 +35,12 @@ struct Args {
 // pub const NOTIFY_TX_URL: &str = "https://localhost:14142/zcashlikedaemoncallback/tx?cryptoCode=yec&hash=";
 
 use crate::db::Db;
-use anyhow::Context;
-use std::sync::Mutex;
-use zcash_client_backend::encoding::decode_extended_full_viewing_key;
 use crate::scan::monitor_task;
+use anyhow::Context;
 use rocket::fairing::AdHoc;
 use serde::Deserialize;
+use std::sync::Mutex;
+use zcash_client_backend::encoding::decode_extended_full_viewing_key;
 
 pub struct FVK(pub Mutex<ExtendedFullViewingKey>);
 
@@ -57,13 +57,11 @@ pub struct WalletConfig {
 
 impl WalletConfig {
     pub fn network(&self) -> Network {
-        let network = if self.regtest {
+        if self.regtest {
             Network::Regtest
-        }
-        else {
+        } else {
             Network::Main
-        };
-        network
+        }
     }
 }
 
@@ -81,7 +79,9 @@ async fn main() -> anyhow::Result<()> {
     let network = config.network();
 
     let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
-    let fvk = decode_extended_full_viewing_key(network.hrp_sapling_extended_full_viewing_key(), &fvk).expect("Invalid viewing key");
+    let fvk =
+        decode_extended_full_viewing_key(network.hrp_sapling_extended_full_viewing_key(), &fvk)
+            .expect("Invalid viewing key");
     if let Some(notify_tx_url) = notify_tx_url {
         config.notify_tx_url = notify_tx_url;
     }
@@ -91,14 +91,18 @@ async fn main() -> anyhow::Result<()> {
     if !db_exists {
         db.new_account("")?;
     }
-    let birth_height =
-        if !db_exists || args.rescan {
-            dotenv::var("BIRTH_HEIGHT").ok().map(|h| u32::from_str(&h).unwrap())
-        }
-    else { None };
+    let birth_height = if !db_exists || args.rescan {
+        dotenv::var("BIRTH_HEIGHT")
+            .ok()
+            .map(|h| u32::from_str(&h).unwrap())
+    } else {
+        None
+    };
 
     monitor_task(birth_height, config.port, config.poll_interval).await;
-    rocket.manage(db).manage(fvk)
+    rocket
+        .manage(db)
+        .manage(fvk)
         .mount(
             "/",
             routes![
@@ -114,7 +118,8 @@ async fn main() -> anyhow::Result<()> {
             ],
         )
         .attach(AdHoc::config::<WalletConfig>())
-        .launch().await?;
+        .launch()
+        .await?;
 
     Ok(())
 }
