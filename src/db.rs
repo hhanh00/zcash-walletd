@@ -9,7 +9,6 @@ use zcash_primitives::zip32::DiversifierIndex;
 use crate::scan::DecryptedNote;
 use std::collections::HashMap;
 use crate::transaction::{Transfer, SubAddress};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Db {
     network: Network,
