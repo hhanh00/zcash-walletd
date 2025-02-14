@@ -9,6 +9,7 @@ use zcash_primitives::zip32::DiversifierIndex;
 use crate::scan::DecryptedNote;
 use std::collections::HashMap;
 use crate::transaction::{Transfer, SubAddress};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Db {
     network: Network,
@@ -269,16 +270,12 @@ impl Db {
             })?;
         let (next_index, pa) = if let Some(diversifier) = diversifier {
             let mut di = [0u8; 11];
-            di[0..8].copy_from_slice(&diversifier.to_le_bytes());
-            let mut index = DiversifierIndex::from(di);
-            index
-                .increment()
-                .map_err(|_| anyhow::anyhow!("Out of diversified addresses"))?;
-            let pa = self
+            di[0..8].copy_from_slice(&(diversifier + 1).to_le_bytes());
+            let index = DiversifierIndex::from(di);
+            self
                 .fvk
-                .address(index)
-                .ok_or_else(|| anyhow::anyhow!("Could not derive new subaccount"))?;
-            (index, pa)
+                .find_address(index)
+                .ok_or_else(|| anyhow::anyhow!("Could not derive new subaccount"))?
         } else {
             self.fvk
                 .default_address()
