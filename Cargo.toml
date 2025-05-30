@@ -18,6 +18,7 @@ thiserror = "1.0.30"
 env_logger = "0.8.4"
 log = "0.4.14"
 clap = { version = "3.0.0", features = ["derive"] }
+figment = { version = "0.10", features = ["env", "toml", "json"] }
 
 # REST / RPC
 rocket = { version = "0.5.0-rc.1", features = [ "json" ] }

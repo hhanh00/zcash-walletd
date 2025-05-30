@@ -35,19 +35,22 @@ struct Args {
 // pub const NOTIFY_TX_URL: &str = "https://localhost:14142/zcashlikedaemoncallback/tx?cryptoCode=yec&hash=";
 
 use crate::db::Db;
-use anyhow::Context;
 use std::sync::Mutex;
 use zcash_client_backend::encoding::decode_extended_full_viewing_key;
 use crate::scan::monitor_task;
 use rocket::fairing::AdHoc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use figment::{Figment, providers::{Json, Format, Env}};
+use std::path::Path;
 
 pub struct FVK(pub Mutex<ExtendedFullViewingKey>);
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct WalletConfig {
     port: u16,
     db_path: String,
+    config_path: Option<String>,
+    vk: Option<String>,
     confirmations: u32,
     lwd_url: String,
     notify_tx_url: String,
@@ -67,32 +70,39 @@ impl WalletConfig {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct DataConfig {
+    confirmations: Option<u32>,
+    birth_height: Option<u32>
+}
+
 #[rocket::main]
 async fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
     let args: Args = Args::parse();
-    let rocket = rocket::build();
-    let figment = rocket.figment();
-    let mut config: WalletConfig = figment.extract().unwrap();
+    let data_config: DataConfig = Figment::new()
+        .merge(Json::file(Path::new("/data/config.json")))
+        .extract()?;
+
+    let mut figment = rocket::Config::figment()
+        .merge(Json::file("/data/config.json"))
+        .merge(Env::raw()
+            .only(&["NOTIFY_TX_URL", "LWD_URL", "VK", "CONFIRMATIONS"])
+            .global()
+        );
+    if let Some(confirmations) = data_config.confirmations {
+        figment = figment.merge(("confirmations", confirmations));
+    }
+    let config: WalletConfig = figment.extract().unwrap();
+
     let fvk = dotenv::var("VK")
-        .context("Seed missing from .env file")
-        .unwrap();
+        .ok()
+        .or(config.vk.clone())
+        .expect("VK missing from .env file or data config");
     let network = config.network();
 
-    let lwd_url = dotenv::var("LWD_URL").ok();
-    let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
-    let confirmations = dotenv::var("CONFIRMATIONS").ok().map(|c| u32::from_str(&c).unwrap());
     let fvk = decode_extended_full_viewing_key(network.hrp_sapling_extended_full_viewing_key(), &fvk).expect("Invalid viewing key");
-    if let Some(notify_tx_url) = notify_tx_url {
-        config.notify_tx_url = notify_tx_url;
-    }
-    if let Some(lwd_url) = lwd_url {
-        config.lwd_url = lwd_url;
-    }
-    if let Some(confirmations) = confirmations {
-        config.confirmations = confirmations;
-    }
     let db = Db::new(network, &config.db_path, &fvk);
     let fvk = FVK(Mutex::new(fvk.clone()));
     let db_exists = db.create().unwrap();
@@ -101,12 +111,21 @@ async fn main() -> anyhow::Result<()> {
     }
     let birth_height =
         if !db_exists || args.rescan {
-            dotenv::var("BIRTH_HEIGHT").ok().map(|h| u32::from_str(&h).unwrap())
+            dotenv::var("BIRTH_HEIGHT")
+            .ok()
+            .and_then(|h| u32::from_str(&h).ok())
+            .or(data_config.birth_height.clone())
+            .or_else(|| {
+                panic!("BIRTH_HEIGHT missing from .env file or data config");
+            })
         }
     else { None };
 
     monitor_task(birth_height, config.port, config.poll_interval).await;
-    rocket.manage(db).manage(fvk)
+
+    rocket::custom(figment)
+        .manage(db)
+        .manage(fvk)
         .mount(
             "/",
             routes![
