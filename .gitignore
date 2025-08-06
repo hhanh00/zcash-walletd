@@ -4,3 +4,4 @@ gen.sh
 rpc.tpl
 .env
 *.db
+node_modules/
