@@ -1,6 +1,7 @@
 name: Build and Release on MacOS
 
 on:
+  pull_request:
   workflow_dispatch:
   workflow_call:
 
@@ -11,3 +12,29 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+      - uses: oras-project/setup-oras@v1
+      - name: Pull zcashd package
+        run: |
+          oras login ghcr.io -u hhanh00 --password $GHCR_PASSWORD
+          oras pull ghcr.io/hhanh00/zcashd:6.3.0
+          tar xvzf zcashd.tar.gz
+          echo "$PWD/zcashd" >> $GITHUB_PATH
+        env:
+          GHCR_PASSWORD: ${{ secrets.GHCR_PASSWORD }}
+      - name: Setup regtest
+        run: |
+          pushd zcashd
+          mkdir regtest
+          cp zcash.conf regtest/
+          ./setup-regtest.sh
+          lightwalletd --no-tls-very-insecure --zcash-conf-path regtest/zcash.conf --data-dir regtest --grpc-bind-addr 0.0.0.0:9067 &
+          popd
+      - name: Build
+        run: cargo build
+      - name: Run
+        env:
+          RUST_LOG: info
+        run: |
+          cp sample.env .env
+          ./target/debug/zcash-walletd &
+          sleep 30
