@@ -302,7 +302,7 @@ pub async fn notify_tx(tx_id: &[u8], notify_tx_url: &str) -> Result<()> {
     let res = reqwest::Client::builder().danger_accept_invalid_certs(true)
         .build()?.get(url).send().await;
     if let Err(e) = res {
-        log::warn!("Failed to notify new tx: {}", e.to_string());
+        log::warn!("Failed to notify new tx: {e}",);
     }
 
     Ok(())

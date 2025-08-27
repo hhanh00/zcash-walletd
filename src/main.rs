@@ -10,6 +10,7 @@ mod db;
 mod rpc;
 mod scan;
 mod transaction;
+pub mod scan2;
 
 use anyhow::Result;
 use tracing::level_filters::LevelFilter;
