@@ -4,7 +4,6 @@ use crate::network::Network;
 use sapling_crypto::keys::PreparedIncomingViewingKey;
 use sapling_crypto::note::ExtractedNoteCommitment;
 use sapling_crypto::note_encryption::{try_sapling_compact_note_decryption, try_sapling_note_decryption, CompactOutputDescription};
-use sapling_crypto::zip32::ExtendedFullViewingKey;
 use sapling_crypto::{Node, ViewingKey, NOTE_COMMITMENT_TREE_DEPTH};
 use tonic::Request;
 use zcash_primitives::merkle_tree::read_commitment_tree;
@@ -56,7 +55,7 @@ pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) ->
     Ok(latest_height as u32)
 }
 
-pub async fn scan_blocks(network: Network, start_height: u32, lwd_url: &str, fvk: &ExtendedFullViewingKey, mut prev_block_hash: Option<[u8; 32]>)
+pub async fn scan_blocks(network: Network, start_height: u32, lwd_url: &str, fvk: &PreparedIncomingViewingKey, mut prev_block_hash: Option<[u8; 32]>)
     -> Result<(impl Stream<Item=ScannerOutput>, BoxFuture<'static, Result<()>>)> {
     let mut client = CompactTxStreamerClient::connect(lwd_url.to_string()).await?;
     let latest_height = get_latest_height(&mut client).await?;
@@ -126,18 +125,14 @@ pub struct DecryptedNote {
     pub memo: String,
 }
 
-async fn scan_one_block(network: &Network, block: &CompactBlock, fvk: &ExtendedFullViewingKey, start_position: usize, tx: &Sender<ScannerOutput>) -> Result<usize> {
-    // println!("{}", block.height);
-    let vk = fvk.fvk.vk.clone();
-    let ivk = vk.ivk();
-    let pivk = PreparedIncomingViewingKey::new(&ivk);
+async fn scan_one_block(network: &Network, block: &CompactBlock, pivk: &PreparedIncomingViewingKey, start_position: usize, tx: &Sender<ScannerOutput>) -> Result<usize> {
     let height = BlockHeight::from_u32(block.height as u32);
     let mut count_notes = 0;
     let zip32_enforcement = zip212_enforcement(network, height);
     for transaction in block.vtx.iter() {
         for cout in transaction.outputs.iter() {
             let co = to_output_description(cout);
-            if try_sapling_compact_note_decryption(&pivk, &co, zip32_enforcement).is_some() {
+            if try_sapling_compact_note_decryption(pivk, &co, zip32_enforcement).is_some() {
                 let mut tx_id = [0u8; 32];
                 tx_id.copy_from_slice(&transaction.hash);
                 let tx_index = TxIndex {
