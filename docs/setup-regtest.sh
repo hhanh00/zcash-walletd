@@ -1,7 +1,7 @@
 #!/bin/sh
 set -x
 zcashd --datadir=regtest --daemon
-sleep 10
+sleep 30
 zcash-cli --datadir=regtest generate 150
 zcash-cli --datadir=regtest z_getnewaccount
 zcash-cli --datadir=regtest z_getaddressforaccount 0
