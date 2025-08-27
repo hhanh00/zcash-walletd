@@ -1,3 +1,4 @@
+use anyhow::Result;
 use crate::account::AccountBalance;
 use crate::db::Db;
 use crate::network::Network;
@@ -27,14 +28,14 @@ pub struct CreateAccountResponse {
 }
 
 #[post("/create_account", data = "<request>")]
-pub fn create_account(
+pub async fn create_account(
     request: Json<CreateAccountRequest>,
     db: &State<Db>,
 ) -> Result<Json<CreateAccountResponse>, Debug<anyhow::Error>> {
     let request = request.into_inner();
     let name = request.label.unwrap_or("".to_string());
 
-    let account = db.new_account(&name)?;
+    let account = db.new_account(&name).await?;
     let rep = CreateAccountResponse {
         account_index: account.account_index,
         address: account.address,
@@ -55,13 +56,13 @@ pub struct CreateAddressResponse {
 }
 
 #[post("/create_address", data = "<request>")]
-pub fn create_address(
+pub async fn create_address(
     request: Json<CreateAddressRequest>,
     db: &State<Db>,
 ) -> Result<Json<CreateAddressResponse>, Debug<anyhow::Error>> {
     let request = request.into_inner();
     let name = request.label.unwrap_or("".to_string());
-    let sub_account = db.new_sub_account(request.account_index, &name)?;
+    let sub_account = db.new_sub_account(request.account_index, &name).await?;
 
     let rep = CreateAddressResponse {
         address: sub_account.address.clone(),
@@ -89,7 +90,7 @@ pub async fn get_accounts(
 ) -> Result<Json<GetAccountsResponse>, Debug<anyhow::Error>> {
     let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone()).await.map_err(from_tonic)?;
     let latest_height = get_latest_height(&mut client).await?;
-    let sub_accounts = db.get_accounts(latest_height, config.confirmations)?;
+    let sub_accounts = db.get_accounts(latest_height, config.confirmations).await?;
     let total_balance: u64 = sub_accounts.iter().map(|sa| sa.balance).sum();
     let total_unlocked_balance: u64 = sub_accounts.iter().map(|sa| sa.unlocked_balance).sum();
 
@@ -122,7 +123,7 @@ pub async fn get_transaction(
     let request = request.into_inner();
     let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone()).await.map_err(from_tonic)?;
     let latest_height = get_latest_height(&mut client).await?;
-    let transfers = db.get_transfers_by_txid(latest_height, &request.txid, request.account_index, config.confirmations)?;
+    let transfers = db.get_transfers_by_txid(latest_height, &request.txid, request.account_index, config.confirmations).await?;
     let rep = GetTransactionByIdResponse {
         transfer: transfers[0].clone(),
         transfers,
@@ -152,7 +153,7 @@ pub async fn get_transfers(
     assert!(request.r#in);
     let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone()).await.map_err(from_tonic)?;
     let latest_height = get_latest_height(&mut client).await?;
-    let transfers = db.get_transfers(latest_height, request.account_index, &request.subaddr_indices, config.confirmations)?;
+    let transfers = db.get_transfers(latest_height, request.account_index, &request.subaddr_indices, config.confirmations).await?;
     let rep = GetTransfersResponse {
         r#in: transfers,
     };
@@ -244,8 +245,8 @@ pub async fn request_scan(
     if let Err(error) = res { // Rewind if we hit a chain reorg but don't error
         match error.root_cause().downcast_ref::<ScanError>() {
             Some(ScanError::Reorganization) => {
-                let synced_height = db.get_synced_height()?;
-                db.truncate_height(synced_height - config.confirmations)
+                let synced_height = db.get_synced_height().await?;
+                db.truncate_height(synced_height - config.confirmations).await
             },
             None => Err(error),
         }?
@@ -254,37 +255,37 @@ pub async fn request_scan(
     Ok(Json(rep))
 }
 
-pub async fn scan(network: Network, fvk: ExtendedFullViewingKey, start_height: Option<u32>, db: &State<Db>, config: &State<WalletConfig>) -> anyhow::Result<()> {
+pub async fn scan(network: Network, fvk: ExtendedFullViewingKey, start_height: Option<u32>, db: &State<Db>, config: &State<WalletConfig>) -> Result<()> {
     let vk = fvk.fvk.vk.clone();
     let ivk = vk.ivk();
     let pivk = PreparedIncomingViewingKey::new(&ivk);
 
     let start_height = match start_height {
         Some(h) => h,
-        None => db.get_synced_height()? + 1,
+        None => db.get_synced_height().await? + 1,
     };
 
-    db.truncate_height(start_height)?;
-    let prev_block_hash = db.get_block_hash(start_height - 1)?;
+    db.truncate_height(start_height).await?;
+    let prev_block_hash = db.get_block_hash(start_height - 1).await?;
     let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone()).await.map_err(from_tonic)?;
     let (mut tx_stream, scanner_handle) = scan_blocks(network.clone(), start_height, &config.lwd_url, &fvk, prev_block_hash).await?;
-    let mut nf_map = db.get_nfs()?;
+    let mut nf_map = db.get_nfs().await?;
     while let Some(scan_output) = tx_stream.next().await {
         match scan_output {
             ScannerOutput::TxIndex(tx_index) => {
                 let (spends, outputs, value) = scan_transaction(&network, &mut client, tx_index.height, tx_index.tx_id, tx_index.position, &vk, &pivk, &nf_map).await?;
-                let id_tx = db.store_tx(tx_index.tx_id.as_ref(), tx_index.height, value)?;
+                let id_tx = db.store_tx(tx_index.tx_id.as_ref(), tx_index.height, value).await?;
                 for id_note in spends.iter() {
-                    db.mark_spent(*id_note, id_tx)?;
+                    db.mark_spent(*id_note, id_tx).await?;
                 }
                 for n in outputs.iter() {
-                    let id_note = db.store_note(n, id_tx)?;
+                    let id_note = db.store_note(n, id_tx).await?;
                     nf_map.insert(n.nf, id_note);
                 }
                 notify_tx(tx_index.tx_id.as_ref(), &config.notify_tx_url).await?;
             }
             ScannerOutput::Block(block) => {
-                db.store_block(block.height, &block.hash)?;
+                db.store_block(block.height, &block.hash).await?;
             }
         }
     }
@@ -293,7 +294,7 @@ pub async fn scan(network: Network, fvk: ExtendedFullViewingKey, start_height: O
     Ok(())
 }
 
-pub async fn notify_tx(tx_id: &[u8], notify_tx_url: &str) -> anyhow::Result<()> {
+pub async fn notify_tx(tx_id: &[u8], notify_tx_url: &str) -> Result<()> {
     let mut tx_id = tx_id.to_vec();
     tx_id.reverse();
     let url = notify_tx_url.to_string() + &hex::encode(&tx_id);

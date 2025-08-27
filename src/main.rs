@@ -11,6 +11,7 @@ mod rpc;
 mod scan;
 mod transaction;
 
+use anyhow::Result;
 use std::str::FromStr;
 pub use crate::rpc::*;
 use network::Network;
@@ -68,7 +69,7 @@ impl WalletConfig {
 }
 
 #[rocket::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
     let args: Args = Args::parse();
@@ -85,11 +86,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(notify_tx_url) = notify_tx_url {
         config.notify_tx_url = notify_tx_url;
     }
-    let db = Db::new(network, &config.db_path, &fvk);
+    let db = Db::new(network, &config.db_path, &fvk).await?;
     let fvk = FVK(Mutex::new(fvk.clone()));
-    let db_exists = db.create().unwrap();
+    let db_exists = db.create().await?;
     if !db_exists {
-        db.new_account("")?;
+        db.new_account("").await?;
     }
     let birth_height =
         if !db_exists || args.rescan {

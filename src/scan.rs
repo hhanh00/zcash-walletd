@@ -1,3 +1,4 @@
+use anyhow::Result;
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
 use crate::network::Network;
 use sapling_crypto::keys::PreparedIncomingViewingKey;
@@ -49,14 +50,14 @@ pub struct Block {
     pub hash: [u8; 32],
 }
 
-pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) -> anyhow::Result<u32> {
+pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) -> Result<u32> {
     let latest_block_id = client.get_latest_block(Request::new(ChainSpec {})).await?.into_inner();
     let latest_height = latest_block_id.height;
     Ok(latest_height as u32)
 }
 
 pub async fn scan_blocks(network: Network, start_height: u32, lwd_url: &str, fvk: &ExtendedFullViewingKey, mut prev_block_hash: Option<[u8; 32]>)
-    -> anyhow::Result<(impl Stream<Item=ScannerOutput>, BoxFuture<'static, anyhow::Result<()>>)> {
+    -> Result<(impl Stream<Item=ScannerOutput>, BoxFuture<'static, Result<()>>)> {
     let mut client = CompactTxStreamerClient::connect(lwd_url.to_string()).await?;
     let latest_height = get_latest_height(&mut client).await?;
     let start_block_id = BlockId {
@@ -125,7 +126,7 @@ pub struct DecryptedNote {
     pub memo: String,
 }
 
-async fn scan_one_block(network: &Network, block: &CompactBlock, fvk: &ExtendedFullViewingKey, start_position: usize, tx: &Sender<ScannerOutput>) -> anyhow::Result<usize> {
+async fn scan_one_block(network: &Network, block: &CompactBlock, fvk: &ExtendedFullViewingKey, start_position: usize, tx: &Sender<ScannerOutput>) -> Result<usize> {
     // println!("{}", block.height);
     let vk = fvk.fvk.vk.clone();
     let ivk = vk.ivk();
@@ -160,7 +161,7 @@ pub fn to_output_description(co: &CompactOutput) -> CompactOutputDescription {
     epk.copy_from_slice(&co.epk);
     let mut enc_ciphertext = [0u8; 52];
     enc_ciphertext.copy_from_slice(&co.ciphertext);
-    
+
     CompactOutputDescription {
         ephemeral_key: epk.into(),
         cmu: ExtractedNoteCommitment::from_bytes(&cmu).unwrap(),
@@ -169,7 +170,7 @@ pub fn to_output_description(co: &CompactOutput) -> CompactOutputDescription {
 }
 
 pub async fn scan_transaction(network: &Network, client: &mut CompactTxStreamerClient<Channel>, height: u32, tx_id: TxId,
-                              tx_position: usize, vk: &ViewingKey, pivk: &PreparedIncomingViewingKey, nf_map: &HashMap<[u8; 32], u32>) -> anyhow::Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
+                              tx_position: usize, vk: &ViewingKey, pivk: &PreparedIncomingViewingKey, nf_map: &HashMap<[u8; 32], u32>) -> Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
     log::info!("Scan tx id: {}", tx_id);
     let raw_tx = client.get_transaction(Request::new(TxFilter {
         block: None,
