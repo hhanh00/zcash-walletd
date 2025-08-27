@@ -181,14 +181,13 @@ impl Db {
         let height = sqlx::query("SELECT MAX(height) FROM blocks")
             .map(|row: SqliteRow| {
                 let h: Option<u32> = row.get(0);
-                let height = h.unwrap_or_else(|| {
+                h.unwrap_or_else(|| {
                     u32::from(
                         self.network
                             .activation_height(NetworkUpgrade::Sapling)
                             .unwrap(),
                     )
-                });
-                height
+                })
             })
             .fetch_one(&mut *connection)
             .await?;
@@ -235,7 +234,7 @@ impl Db {
         txid.reverse();
         let memo: String = row.get(4);
         let height: u32 = row.get(5);
-        let t = Transfer {
+        Transfer {
             address,
             amount: value,
             confirmations: latest_height - height + 1,
@@ -252,8 +251,7 @@ impl Db {
             txid: hex::encode(txid),
             r#type: "in".to_string(),
             unlock_time: 0,
-        };
-        t
+        }
     }
 
     pub async fn get_transfers(

@@ -35,7 +35,7 @@ mod tests {
     #[allow(dead_code)]
     fn derive_account(phrase: &str, account_index: u32) -> Result<Account> {
         let network = crate::network::Network::Regtest;
-        let mnemonic = Mnemonic::from_phrase(&phrase, Language::English)?;
+        let mnemonic = Mnemonic::from_phrase(phrase, Language::English)?;
         let seed = Seed::new(&mnemonic, "");
         let master = ExtendedSpendingKey::master(seed.as_bytes());
         let path = [
@@ -53,7 +53,7 @@ mod tests {
             encode_extended_full_viewing_key(network.hrp_sapling_extended_full_viewing_key(), &fvk);
         let address = encode_payment_address(network.hrp_sapling_payment_address(), &pa);
 
-        println!("{} {}", esk, efvk);
+        tracing::info!("{} {}", esk, efvk);
 
         Ok(Account {
             account_index,

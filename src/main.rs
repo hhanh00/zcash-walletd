@@ -12,6 +12,8 @@ mod scan;
 mod transaction;
 
 use anyhow::Result;
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::{fmt::{self, format::FmtSpan}, layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer, Registry};
 use std::str::FromStr;
 pub use crate::rpc::*;
 use network::Network;
@@ -58,13 +60,12 @@ pub struct WalletConfig {
 
 impl WalletConfig {
     pub fn network(&self) -> Network {
-        let network = if self.regtest {
+        if self.regtest {
             Network::Regtest
         }
         else {
             Network::Main
-        };
-        network
+        }
     }
 }
 
@@ -72,6 +73,10 @@ impl WalletConfig {
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
+    let _ = Registry::default()
+        .with(default_layer())
+        .with(env_layer())
+        .try_init();
     let args: Args = Args::parse();
     let rocket = rocket::build();
     let figment = rocket.figment();
@@ -127,4 +132,27 @@ fn to_tonic<E: ToString>(e: E) -> tonic::Status {
 
 fn from_tonic<E: ToString>(e: E) -> anyhow::Error {
     anyhow::anyhow!(e.to_string())
+}
+
+type BoxedLayer<S> = Box<dyn Layer<S> + Send + Sync + 'static>;
+
+fn default_layer<S>() -> BoxedLayer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fmt::layer()
+        .with_ansi(false)
+        .with_span_events(FmtSpan::ACTIVE)
+        .compact()
+        .boxed()
+}
+
+fn env_layer<S>() -> BoxedLayer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env_lossy()
+        .boxed()
 }

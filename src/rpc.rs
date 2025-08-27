@@ -268,7 +268,7 @@ pub async fn scan(network: Network, fvk: ExtendedFullViewingKey, start_height: O
     db.truncate_height(start_height).await?;
     let prev_block_hash = db.get_block_hash(start_height - 1).await?;
     let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone()).await.map_err(from_tonic)?;
-    let (mut tx_stream, scanner_handle) = scan_blocks(network.clone(), start_height, &config.lwd_url, &fvk, prev_block_hash).await?;
+    let (mut tx_stream, scanner_handle) = scan_blocks(network, start_height, &config.lwd_url, &fvk, prev_block_hash).await?;
     let mut nf_map = db.get_nfs().await?;
     while let Some(scan_output) = tx_stream.next().await {
         match scan_output {
