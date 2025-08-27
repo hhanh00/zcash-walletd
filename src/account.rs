@@ -23,6 +23,7 @@ pub struct AccountBalance {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
     use crate::account::Account;
     use bip39::{Language, Mnemonic, Seed};
     use zcash_client_backend::encoding::{
@@ -32,7 +33,7 @@ mod tests {
     use sapling_crypto::zip32::ExtendedSpendingKey;
 
     #[allow(dead_code)]
-    fn derive_account(phrase: &str, account_index: u32) -> anyhow::Result<Account> {
+    fn derive_account(phrase: &str, account_index: u32) -> Result<Account> {
         let network = crate::network::Network::Regtest;
         let mnemonic = Mnemonic::from_phrase(&phrase, Language::English)?;
         let seed = Seed::new(&mnemonic, "");

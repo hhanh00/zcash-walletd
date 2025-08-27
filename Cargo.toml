@@ -30,7 +30,7 @@ tokio = { version = "^1.6", features = ["macros", "rt-multi-thread"] }
 tokio-stream = "0.1.7"
 
 # DB
-rusqlite = "0.26.1"
+sqlx = {version = "0.8.6", features = ["sqlite", "runtime-tokio"]}
 
 # Crypto
 tiny-bip39 = "0.8"
