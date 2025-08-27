@@ -1,4 +1,5 @@
 use anyhow::Result;
+use zcash_client_backend::keys::UnifiedFullViewingKey;
 use crate::account::AccountBalance;
 use crate::db::Db;
 use crate::network::Network;
@@ -7,7 +8,6 @@ use rocket::response::Debug;
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::State;
 use sapling_crypto::keys::PreparedIncomingViewingKey;
-use sapling_crypto::zip32::ExtendedFullViewingKey;
 use crate::scan::{scan_blocks, scan_transaction, get_latest_height};
 use crate::{FVK, from_tonic, WalletConfig};
 use tokio_stream::StreamExt;
@@ -239,7 +239,7 @@ pub async fn request_scan(
 ) -> Result<Json<ScanResponse>, Debug<anyhow::Error>> {
     let network = config.network();
     let request = request.into_inner();
-    let fvk: ExtendedFullViewingKey = fvk.0.lock().unwrap().clone();
+    let fvk = fvk.0.lock().unwrap().clone();
 
     let res = scan(network, fvk, request.start_height, db, config).await;
     if let Err(error) = res { // Rewind if we hit a chain reorg but don't error
@@ -255,8 +255,8 @@ pub async fn request_scan(
     Ok(Json(rep))
 }
 
-pub async fn scan(network: Network, fvk: ExtendedFullViewingKey, start_height: Option<u32>, db: &State<Db>, config: &State<WalletConfig>) -> Result<()> {
-    let vk = fvk.fvk.vk.clone();
+pub async fn scan(network: Network, fvk: UnifiedFullViewingKey, start_height: Option<u32>, db: &State<Db>, config: &State<WalletConfig>) -> Result<()> {
+    let vk = &fvk.sapling().unwrap().fvk().vk;
     let ivk = vk.ivk();
     let pivk = PreparedIncomingViewingKey::new(&ivk);
 
@@ -268,12 +268,12 @@ pub async fn scan(network: Network, fvk: ExtendedFullViewingKey, start_height: O
     db.truncate_height(start_height).await?;
     let prev_block_hash = db.get_block_hash(start_height - 1).await?;
     let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone()).await.map_err(from_tonic)?;
-    let (mut tx_stream, scanner_handle) = scan_blocks(network, start_height, &config.lwd_url, &fvk, prev_block_hash).await?;
+    let (mut tx_stream, scanner_handle) = scan_blocks(network, start_height, &config.lwd_url, &pivk, prev_block_hash).await?;
     let mut nf_map = db.get_nfs().await?;
     while let Some(scan_output) = tx_stream.next().await {
         match scan_output {
             ScannerOutput::TxIndex(tx_index) => {
-                let (spends, outputs, value) = scan_transaction(&network, &mut client, tx_index.height, tx_index.tx_id, tx_index.position, &vk, &pivk, &nf_map).await?;
+                let (spends, outputs, value) = scan_transaction(&network, &mut client, tx_index.height, tx_index.tx_id, tx_index.position, vk, &pivk, &nf_map).await?;
                 let id_tx = db.store_tx(tx_index.tx_id.as_ref(), tx_index.height, value).await?;
                 for id_note in spends.iter() {
                     db.mark_spent(*id_note, id_tx).await?;

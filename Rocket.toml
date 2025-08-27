@@ -5,6 +5,7 @@ lwd_url = "http://127.0.0.1:9067"
 notify_tx_url = "http://btcpayserver:9000/zcashlikedaemoncallback/tx?cryptoCode=zec&hash="
 poll_interval = 60
 regtest = true
+orchard = true
 
 [debug]
 address = "127.0.0.1"

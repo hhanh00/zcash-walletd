@@ -14,10 +14,10 @@ mod transaction;
 use anyhow::Result;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{fmt::{self, format::FmtSpan}, layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer, Registry};
+use zcash_address::unified::{self, Encoding, Ufvk};
 use std::str::FromStr;
 pub use crate::rpc::*;
 use network::Network;
-use sapling_crypto::zip32::ExtendedFullViewingKey;
 
 use clap::Parser;
 use zcash_protocol::consensus::NetworkConstants as _;
@@ -40,12 +40,12 @@ struct Args {
 use crate::db::Db;
 use anyhow::Context;
 use std::sync::Mutex;
-use zcash_client_backend::encoding::decode_extended_full_viewing_key;
+use zcash_client_backend::{encoding::decode_extended_full_viewing_key, keys::UnifiedFullViewingKey};
 use crate::scan::monitor_task;
 use rocket::fairing::AdHoc;
 use serde::Deserialize;
 
-pub struct FVK(pub Mutex<ExtendedFullViewingKey>);
+pub struct FVK(pub Mutex<UnifiedFullViewingKey>);
 
 #[derive(Deserialize)]
 pub struct WalletConfig {
@@ -56,6 +56,7 @@ pub struct WalletConfig {
     notify_tx_url: String,
     poll_interval: u16,
     regtest: bool,
+    orchard: bool,
 }
 
 impl WalletConfig {
@@ -85,6 +86,7 @@ async fn main() -> Result<()> {
         .context("Seed missing from .env file")
         .unwrap();
     let network = config.network();
+    tracing::info!("Orchard = {}", config.orchard);
 
     let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
     let fvk = decode_extended_full_viewing_key(network.hrp_sapling_extended_full_viewing_key(), &fvk).expect("Invalid viewing key");
@@ -92,7 +94,9 @@ async fn main() -> Result<()> {
         config.notify_tx_url = notify_tx_url;
     }
     let db = Db::new(network, &config.db_path, &fvk).await?;
-    let fvk = FVK(Mutex::new(fvk.clone()));
+    let sfvk = unified::Fvk::Sapling(fvk.to_diversifiable_full_viewing_key().to_bytes());
+    let ufvk = Ufvk::try_from_items(vec![sfvk])?;
+    let fvk = FVK(Mutex::new(UnifiedFullViewingKey::parse(&ufvk)?));
     let db_exists = db.create().await?;
     if !db_exists {
         db.new_account("").await?;
