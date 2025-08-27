@@ -4,7 +4,7 @@ use crate::scan::DecryptedNote;
 use crate::transaction::{SubAddress, Transfer};
 use anyhow::Result;
 use sapling_crypto::zip32::ExtendedFullViewingKey;
-use sqlx::sqlite::SqliteRow;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 use std::collections::HashMap;
 use zcash_client_backend::encoding::encode_payment_address;
@@ -23,7 +23,10 @@ impl Db {
         db_path: &str,
         fvk: &ExtendedFullViewingKey,
     ) -> Result<Self> {
-        let pool = SqlitePool::connect(db_path).await?;
+        let options = SqliteConnectOptions::new()
+            .filename(db_path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await?;
         Ok(Db {
             network,
             pool,
@@ -39,7 +42,7 @@ impl Db {
         let id_account = id_account.map(|id| id + 1).unwrap_or(0);
         let (diversifier_index, address) = self.next_diversifier(&mut connection).await?;
 
-        sqlx::query("INSERT INTO addresses(label, account, 0, address, diversifier_index) VALUES (?1,?2,0,?3,?4)")
+        sqlx::query("INSERT INTO addresses(label, account, sub_account, address, diversifier_index) VALUES (?1,?2,0,?3,?4)")
             .bind(name)
             .bind(id_account)
             .bind(&address)
