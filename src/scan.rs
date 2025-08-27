@@ -169,6 +169,7 @@ pub fn to_output_description(co: &CompactOutput) -> CompactOutputDescription {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn scan_transaction(network: &Network, client: &mut CompactTxStreamerClient<Channel>, height: u32, tx_id: TxId,
                               tx_position: usize, vk: &ViewingKey, pivk: &PreparedIncomingViewingKey, nf_map: &HashMap<[u8; 32], u32>) -> Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
     log::info!("Scan tx id: {}", tx_id);
@@ -235,7 +236,7 @@ pub async fn monitor_task(birth_height: Option<u32>, port: u16, poll_interval: u
         loop {
             let client = reqwest::Client::new();
             client
-                .post(format!("http://localhost:{}/request_scan", port))
+                .post(format!("http://localhost:{port}/request_scan", ))
                 .json(&params)
                 .send().await?;
             params.clear();
