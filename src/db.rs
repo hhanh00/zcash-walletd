@@ -308,7 +308,7 @@ impl Db {
     pub async fn get_nfs(&self) -> Result<HashMap<[u8; 32], u64>> {
         let mut connection = self.pool.acquire().await?;
 
-        let nfs = sqlx::query("SELECT nf, value FROM received_notes WHERE spent IS NULL")
+        let nfs = sqlx::query("SELECT nf, value FROM received_notes WHERE spent = 0")
             .map(|row: SqliteRow| {
                 let nf: Vec<u8> = row.get(0);
                 let value: u64 = row.get(1);
@@ -422,31 +422,13 @@ impl Db {
 
     pub async fn store_events(&self, events: &[ScanEvent]) -> Result<()> {
         let mut connection = self.pool.acquire().await?;
-        let mut db_tx = connection.begin().await?;
+        let mut db_transaction = connection.begin().await?;
+        let db_tx = db_transaction.acquire().await?;
 
         for event in events {
             match event {
                 ScanEvent::Received(received_note) => {
-                    let txid = &received_note.txid;
-                    let id_tx = match sqlx::query("SELECT id_tx FROM transactions WHERE txid = ?1")
-                        .bind(txid.as_slice())
-                        .map(|r: SqliteRow| r.get::<u32, _>(0))
-                        .fetch_optional(&mut *db_tx)
-                        .await?
-                    {
-                        Some(id_tx) => id_tx,
-                        None => {
-                            let r = sqlx::query(
-                                "INSERT INTO transactions(txid, height, value) VALUES (?1, ?2, 0)",
-                            )
-                            .bind(txid.as_slice())
-                            .bind(received_note.height)
-                            .execute(&mut *db_tx)
-                            .await?;
-                            let id_tx = r.last_insert_rowid();
-                            id_tx as u32
-                        }
-                    };
+                    let id_tx = self.create_tx_if_not_exists(received_note.height, received_note.txid.as_slice(), db_tx).await?;
                     let (account, sub_account) = match sqlx::query(
                         "SELECT a.account, a.sub_account FROM addresses a
                         JOIN receivers r ON a.id_address = r.id_address
@@ -535,6 +517,7 @@ impl Db {
                         .await?;
                 }
                 ScanEvent::Spent(spent_note) => {
+                    self.create_tx_if_not_exists(spent_note.height, spent_note.txid.as_slice(), db_tx).await?;
                     sqlx::query("UPDATE received_notes SET spent = TRUE WHERE nf = ?1")
                         .bind(spent_note.nf.as_slice())
                         .execute(&mut *db_tx)
@@ -564,9 +547,33 @@ impl Db {
                 }
             }
         }
-        db_tx.commit().await?;
+        db_transaction.commit().await?;
 
         Ok(())
+    }
+
+    pub async fn create_tx_if_not_exists(&self, height: u32, txid: &[u8], db_tx: &mut SqliteConnection) -> Result<u32> {
+        // let txid = &received_note.txid;
+        let id_tx = match sqlx::query("SELECT id_tx FROM transactions WHERE txid = ?1")
+            .bind(txid)
+            .map(|r: SqliteRow| r.get::<u32, _>(0))
+            .fetch_optional(&mut *db_tx)
+            .await?
+        {
+            Some(id_tx) => id_tx,
+            None => {
+                let r =
+                    sqlx::query("INSERT INTO transactions(txid, height, value) VALUES (?1, ?2, 0)")
+                        .bind(txid)
+                        .bind(height)
+                        .execute(db_tx)
+                        .await?;
+                let id_tx = r.last_insert_rowid();
+                id_tx as u32
+            }
+        };
+
+        Ok(id_tx)
     }
 
     pub fn ufvk(&self) -> &UnifiedFullViewingKey {
