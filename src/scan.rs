@@ -102,6 +102,7 @@ pub async fn scan(
                     let nf: &Hash = i.nf.as_slice().try_into().unwrap();
                     if let Some(value) = sap_dec.nfs.get(nf) {
                         events.push(ScanEvent::Spent(SpentNote {
+                            height,
                             nf: *nf,
                             txid: vtx.hash.clone().try_into().unwrap(),
                             value: *value,
@@ -129,6 +130,7 @@ pub async fn scan(
                     let nf: &Hash = a.nullifier.as_slice().try_into().unwrap();
                     if let Some(value) = orc_dec.nfs.get(nf) {
                         events.push(ScanEvent::Spent(SpentNote {
+                            height,
                             nf: *nf,
                             txid: vtx.hash.clone().try_into().unwrap(),
                             value: *value,
@@ -262,6 +264,7 @@ pub struct MemoNote {
 
 #[derive(Debug)]
 pub struct SpentNote {
+    pub height: u32,
     pub nf: Hash,
     pub txid: Hash,
     pub value: u64,
