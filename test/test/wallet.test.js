@@ -24,7 +24,7 @@ describe('POST /create_account', function () {
     expect(res.body.account_index).to.be.a('number');
 
     expect(res.body).to.have.property('address');
-    expect(res.body.address).to.match(/^zregtestsapling1[0-9a-z]+$/);
+    expect(res.body.address).to.match(/^uregtest1[0-9a-z]+$/);
   });
 });
 
@@ -34,23 +34,23 @@ describe('POST /create_address - exact match', function () {
   const accountIndex = 1;
   const expectedResults = [
     {
-      address: "zregtestsapling1dkndeymandsp7qx2rc3l5t8u2hlu9wcydtaxmpd6teuysanlmspts54le5qyqsxjwg3fj95a8dn",
+      address: "uregtest1jpvk7vzt7z4tgyn4yhxe3chvzmshsqg9gsts6qvgat2tenh0ehkklvhl4cy6h5hudpk3ryhvp42c6dll0ytxst87hx2z0dlhqyq2hufkxdwxml4mqnf6krcwyfzueu3rd9tuyxr20zzdmm4dc32swqyx0zpr7l0awdtzvkcuzcw9244s",
       address_index: 1
     },
     {
-      address: "zregtestsapling1rlxqfpwfz844jgq0z2fr4jcf4nklmerg9hh2hac9flgzskp680vet7ppe8tkds4m3ncavqpp9w7",
+      address: "uregtest1se78asch326c8czsa2wyzzfuytrvlezzjw42rest6nkqu3dzuvf4ua3lxjzf8gc5ygwca5sjdsqnpzcs087hdpgz4msfazfwfsjtr0lrln7dg0729rzp7y2acm2wrjyr5qjc8mj7x03dqh4a6frku9ue8gv3z54xgxev3dg895hepwej",
       address_index: 2
     },
     {
-      address: "zregtestsapling1duj99qsqx22ax5rvgj6q6q5j5ecfr4h0lkyh3yj98ksnl5plc36824cuwltav3nfxsh62y6n3yz",
+      address: "uregtest1cr7j65lwzksq4a84jx4j2vdtnnc44qmrzs65telp55ghuz5ccfghf5y777n2c8hqqcvunalun4tjwq27p0pra6pdr20ad85t0gcrhr25ztp0prusr75geyf8nq3fyza6xcrzg6583397yyv5rhv49vqm4lzzz4n9n7y7zvjs7qrnuycg",
       address_index: 3
     },
     {
-      address: "zregtestsapling1wa32v4u96vy6lfner6kpuzqpxlmuq90xr2cck3vrtyhfg7huaye58jnc7e9vhg90u70sxay9kts",
+      address: "uregtest1ryfpjtg5qt849zwg58840xvd7gm7pkt5lv2ukfh5wgelsdkvaqeyjxwln6x9glncc3e2zp2cjl326w5n877hw2vm6vq7ekvkglepwrj0yvdghf4vfhtu8jv047v82nkear0jstdf6awszqdffxj487jzdnqdzz4mvcnktfys0y4pk68j",
       address_index: 4
     },
     {
-      address: "zregtestsapling1dle4r23akdxu69g5lfkcqvxu8ec4f9647rvfldnugqjx2hzm5czer2f2e0d3gq3el7k35f4ql3e",
+      address: "uregtest18k2pfu8uw6ah3wkwv0w5zvr97ldd58s9lek4u0h4dw7v8nfxtjxdzegmfu8zuwf6exhhml3q59jtf47wz9pgneh29h5ewn5u53dq0zth43ln0jvnqlyk6smwaw89fmct7m3yqgk497zgzu9p40wt39xqevph0nkwzst4fcxhqymq2mz8",
       address_index: 5
     },
   ];

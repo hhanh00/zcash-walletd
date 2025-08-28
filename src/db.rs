@@ -4,25 +4,23 @@ use crate::scan::DecryptedNote;
 use crate::scan2::ScanEvent;
 use crate::transaction::{SubAddress, Transfer};
 use anyhow::Result;
-use sapling_crypto::zip32::ExtendedFullViewingKey;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
+use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey};
 use std::collections::HashMap;
-use zcash_client_backend::encoding::encode_payment_address;
-use zcash_primitives::consensus::{NetworkConstants as _, NetworkUpgrade, Parameters};
-use zcash_primitives::zip32::DiversifierIndex;
+use zcash_primitives::consensus::{NetworkUpgrade, Parameters};
 
 pub struct Db {
     network: Network,
     pool: SqlitePool,
-    fvk: ExtendedFullViewingKey,
+    ufvk: UnifiedFullViewingKey,
 }
 
 impl Db {
     pub async fn new(
         network: Network,
         db_path: &str,
-        fvk: &ExtendedFullViewingKey,
+        ufvk: &UnifiedFullViewingKey,
     ) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(db_path)
@@ -31,7 +29,7 @@ impl Db {
         Ok(Db {
             network,
             pool,
-            fvk: fvk.clone(),
+            ufvk: ufvk.clone(),
         })
     }
 
@@ -349,26 +347,17 @@ impl Db {
     }
 
     async fn next_diversifier(&self, connection: &mut SqliteConnection) -> Result<(u64, String)> {
-        let (diversifier,): (Option<u64>,) =
-            sqlx::query_as("SELECT MAX(diversifier_index) FROM addresses")
+        let di =
+            sqlx::query("SELECT MAX(diversifier_index) FROM addresses")
+                .map(|r: SqliteRow| r.get::<Option<u64>, _>(0))
                 .fetch_one(&mut *connection)
-                .await?;
-        let (next_index, pa) = if let Some(diversifier) = diversifier {
-            let mut di = [0u8; 11];
-            di[0..8].copy_from_slice(&(diversifier + 1).to_le_bytes());
-            let index = DiversifierIndex::from(di);
-            self.fvk
-                .find_address(index)
-                .ok_or_else(|| anyhow::anyhow!("Could not derive new subaccount"))?
-        } else {
-            self.fvk.default_address()
-        };
-        let mut di = [0u8; 8];
-        di.copy_from_slice(&next_index.as_bytes()[0..8]);
-        let next_index = u64::from_le_bytes(di);
+                .await?.map(|di| di + 1).unwrap_or_default();
+        let (ua, ndi) = self.ufvk.find_address(di.into(), UnifiedAddressRequest::AllAvailableKeys)?;
+        let ua = ua.encode(&self.network);
+        let ndi: u64 = ndi.try_into().unwrap();
         Ok((
-            next_index,
-            encode_payment_address(self.network.hrp_sapling_payment_address(), &pa),
+            ndi,
+            ua,
         ))
     }
 
@@ -443,8 +432,8 @@ impl Db {
         Ok(r.is_some())
     }
 
-    pub async fn store_events(pool: &SqlitePool, events: &[ScanEvent]) -> Result<()> {
-        let mut connection = pool.acquire().await?;
+    pub async fn store_events(&self, events: &[ScanEvent]) -> Result<()> {
+        let mut connection = self.pool.acquire().await?;
         let mut db_tx = connection.begin().await?;
 
         for event in events {
@@ -576,5 +565,9 @@ impl Db {
         db_tx.commit().await?;
 
         Ok(())
+    }
+
+    pub fn ufvk(&self) -> &UnifiedFullViewingKey {
+        &self.ufvk
     }
 }
