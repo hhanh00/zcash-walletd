@@ -1,6 +1,12 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use orchard::{
-    keys::FullViewingKey, note::{ExtractedNoteCommitment, Nullifier}, note_encryption::{CompactAction, OrchardDomain}, primitives::redpallas::{Signature, SpendAuth}, Action
+    keys::FullViewingKey,
+    note::{ExtractedNoteCommitment, Nullifier},
+    note_encryption::{CompactAction, OrchardDomain},
+    primitives::redpallas::{Signature, SpendAuth},
+    Action,
 };
 use sapling_crypto::{
     bundle::OutputDescription,
@@ -34,13 +40,14 @@ pub type Hash = [u8; 32];
 pub type Client = CompactTxStreamerClient<Channel>;
 
 pub async fn scan(
+    network: &Network,
     client: &mut Client,
     start: u32,
     end: u32,
     prev_hash: &Hash,
-    sap_dec: &Option<Decoder<Sapling>>,
-    orc_dec: &Option<Decoder<Orchard>>,
-) -> Result<Vec<WalletTx>> {
+    sap_dec: &mut Option<Decoder<Sapling>>,
+    orc_dec: &mut Option<Decoder<Orchard>>,
+) -> Result<Vec<ScanEvent>> {
     let tree_state = client
         .get_tree_state(Request::new(BlockId {
             height: start as u64,
@@ -67,8 +74,10 @@ pub async fn scan(
     let mut sap_position = get_tree_size(&tree_state.sapling_tree).unwrap();
     let mut orc_position = get_tree_size(&tree_state.orchard_tree).unwrap();
 
-    let mut txs = vec![];
+    let mut events = vec![];
+    let mut new_txids = vec![];
     while let Ok(Some(block)) = blocks.message().await {
+        let height = block.height as u32;
         let block_prev_hash: Hash = block.prev_hash.try_into().unwrap();
         if prev_hash != block_prev_hash {
             println!("{} {}", block.height, hex::encode(block_prev_hash));
@@ -79,30 +88,56 @@ pub async fn scan(
         for vtx in block.vtx.iter() {
             let mut found = false;
             if let Some(sap_dec) = sap_dec {
+                for i in vtx.spends.iter() {
+                    let nf: &Hash = i.nf.as_slice().try_into().unwrap();
+                    if sap_dec.nfs.contains(nf) {
+                        events.push(ScanEvent::Spent(SpentNote { nf: *nf }));
+                    }
+                }
+
                 for o in vtx.outputs.iter() {
-                    if sap_dec.try_compact_note_decryption(o) {
+                    if let Some(n) = sap_dec.try_compact_note_decryption(
+                        network,
+                        height,
+                        &vtx.hash,
+                        sap_position,
+                        o,
+                    )? {
+                        sap_dec.add_nf(n.nf);
+                        events.push(ScanEvent::Received(n));
                         found = true;
                     }
                 }
             }
 
             if let Some(orc_dec) = orc_dec {
-                for o in vtx.actions.iter() {
-                    if orc_dec.try_compact_note_decryption(o) {
+                for a in vtx.actions.iter() {
+                    let nf: &Hash = a.nullifier.as_slice().try_into().unwrap();
+                    if orc_dec.nfs.contains(nf) {
+                        events.push(ScanEvent::Spent(SpentNote { nf: *nf }));
+                    }
+                    if let Some(n) = orc_dec.try_compact_note_decryption(
+                        network,
+                        height,
+                        &vtx.hash,
+                        orc_position,
+                        a,
+                    )? {
+                        orc_dec.add_nf(n.nf);
+                        events.push(ScanEvent::Received(n));
                         found = true;
                     }
                 }
             }
 
             if found {
-                let tx = WalletTx {
-                    height: block.height as u32,
-                    txid: vtx.hash.clone().try_into().unwrap(),
+                let txid: Hash = vtx.hash.clone().try_into().unwrap();
+                new_txids.push(WalletTx {
+                    height,
+                    txid,
                     sap_position,
                     orc_position,
-                };
-                println!("{tx:?}");
-                txs.push(tx);
+                });
             }
 
             sap_position += vtx.outputs.len() as u32;
@@ -110,57 +145,53 @@ pub async fn scan(
         }
     }
 
-    Ok(txs)
+    for wtx in new_txids.iter() {
+        let memos = scan_tx(network, client, wtx, sap_dec, orc_dec).await?;
+        for m in memos {
+            events.push(ScanEvent::Memo(m));
+        }
+    }
+
+    Ok(events)
 }
 
-pub async fn scan_txs(
+pub async fn scan_tx(
     network: &Network,
     client: &mut Client,
-    txs: &[WalletTx],
+    wtx: &WalletTx,
     sap_dec: &Option<Decoder<Sapling>>,
     orc_dec: &Option<Decoder<Orchard>>,
-) -> Result<Vec<ReceivedNote>> {
+) -> Result<Vec<MemoNote>> {
     let mut notes = vec![];
-    for wtx in txs {
-        let txid = &wtx.txid;
-        let raw_tx = client
-            .get_transaction(Request::new(TxFilter {
-                hash: txid.to_vec(),
-                ..TxFilter::default()
-            }))
-            .await?
-            .into_inner();
-        let branch_id = BranchId::for_height(network, BlockHeight::from_u32(wtx.height));
-        let tx = Transaction::read(&*raw_tx.data, branch_id)?;
-        let tx = tx.into_data();
+    let raw_tx = client
+        .get_transaction(Request::new(TxFilter {
+            hash: wtx.txid.to_vec(),
+            ..TxFilter::default()
+        }))
+        .await?
+        .into_inner();
+    let branch_id = BranchId::for_height(network, BlockHeight::from_u32(wtx.height));
+    let tx = Transaction::read(&*raw_tx.data, branch_id)?;
+    let tx = tx.into_data();
 
-        if let Some(sap_dec) = sap_dec {
-            if let Some(sapling_bundle) = tx.sapling_bundle() {
-                for (vout, o) in sapling_bundle.shielded_outputs().iter().enumerate() {
-                    if let Some(note) = sap_dec.try_note_decryption(
-                        network,
-                        wtx.height,
-                        txid,
-                        vout as u32 + wtx.sap_position,
-                        o,
-                    )? {
-                        notes.push(note);
-                    }
+    if let Some(sap_dec) = sap_dec {
+        if let Some(sapling_bundle) = tx.sapling_bundle() {
+            for (vout, o) in sapling_bundle.shielded_outputs().iter().enumerate() {
+                if let Some(note) =
+                    sap_dec.try_note_decryption(vout as u32 + wtx.sap_position, o)?
+                {
+                    notes.push(note);
                 }
             }
         }
-        if let Some(orc_dec) = orc_dec {
-            if let Some(orchard_bundle) = tx.orchard_bundle() {
-                for (vout, a) in orchard_bundle.actions().iter().enumerate() {
-                    if let Some(note) = orc_dec.try_note_decryption(
-                        network,
-                        wtx.height,
-                        txid,
-                        vout as u32 + wtx.orc_position,
-                        a,
-                    )? {
-                        notes.push(note);
-                    }
+    }
+    if let Some(orc_dec) = orc_dec {
+        if let Some(orchard_bundle) = tx.orchard_bundle() {
+            for (vout, a) in orchard_bundle.actions().iter().enumerate() {
+                if let Some(note) =
+                    orc_dec.try_note_decryption(vout as u32 + wtx.orc_position, a)?
+                {
+                    notes.push(note);
                 }
             }
         }
@@ -198,17 +229,24 @@ pub struct ReceivedNote {
     pub rcm: Hash,
     pub nf: Hash,
     pub rho: Option<Hash>,
+}
+
+#[derive(Debug)]
+pub struct MemoNote {
+    pub nf: Hash,
     pub memo: String,
 }
 
+#[derive(Debug)]
 pub struct SpentNote {
-    pub position: u32,
-    pub address: String,
+    pub nf: Hash,
 }
 
-pub enum NoteUpdate {
+#[derive(Debug)]
+pub enum ScanEvent {
     Received(ReceivedNote),
     Spent(SpentNote),
+    Memo(MemoNote),
 }
 
 impl Pool for Sapling {
@@ -219,51 +257,51 @@ impl Pool for Sapling {
 }
 
 pub trait Decode<P: Pool> {
-    fn try_compact_note_decryption(&self, output: &P::CompactOutput) -> bool;
-    fn try_note_decryption(
+    fn try_compact_note_decryption(
         &self,
         network: &Network,
         height: u32,
-        txid: &Hash,
+        txid: &[u8],
         position: u32,
-        output: &P::Output,
+        output: &P::CompactOutput,
     ) -> Result<Option<ReceivedNote>>;
+    fn try_note_decryption(&self, position: u32, output: &P::Output) -> Result<Option<MemoNote>>;
 }
 
 pub struct Decoder<P: Pool> {
     pub nk: P::NullifierKey,
     pub pivk: P::PreparedIncomingViewingKey,
+    pub nfs: HashSet<Hash>,
 }
 
 impl<P: Pool> Decoder<P> {
-    pub fn new(nk: P::NullifierKey, pivk: P::PreparedIncomingViewingKey) -> Self {
-        Self { nk, pivk }
+    pub fn new(nk: P::NullifierKey, pivk: P::PreparedIncomingViewingKey, nfs: Vec<Hash>) -> Self {
+        Self { nk, pivk, nfs: nfs.into_iter().collect() }
+    }
+
+    pub fn add_nf(&mut self, nf: Hash) {
+        self.nfs.insert(nf);
     }
 }
 
 impl Decode<Sapling> for Decoder<Sapling> {
-    fn try_compact_note_decryption(&self, output: &CompactSaplingOutput) -> bool {
-        let domain = SaplingDomain::new(Zip212Enforcement::On);
-        try_compact_note_decryption(&domain, &self.pivk, output).is_some()
-    }
-
-    fn try_note_decryption(
+    fn try_compact_note_decryption(
         &self,
         network: &Network,
         height: u32,
-        txid: &Hash,
+        txid: &[u8],
         position: u32,
-        output: &OutputDescription<[u8; 192]>,
+        output: &CompactSaplingOutput,
     ) -> Result<Option<ReceivedNote>> {
         let domain = SaplingDomain::new(Zip212Enforcement::On);
-        if let Some((note, pa, memo_bytes)) = try_note_decryption(&domain, &self.pivk, output) {
+        if let Some((note, pa)) = try_compact_note_decryption(&domain, &self.pivk, output) {
             let address = pa.encode(network);
             let diversifier = pa.diversifier().0;
             let value = note.value().inner();
             let rcm = note.rcm().to_bytes();
             let nf = note.nf(&self.nk, position as u64);
             let note = ReceivedNote {
-                txid: *txid,
+                txid: txid.try_into().unwrap(),
                 position,
                 height,
                 address,
@@ -272,9 +310,25 @@ impl Decode<Sapling> for Decoder<Sapling> {
                 rcm,
                 nf: nf.to_vec().try_into().unwrap(),
                 rho: None,
-                memo: memo_text(&memo_bytes)?,
             };
             return Ok(Some(note));
+        }
+        Ok(None)
+    }
+
+    fn try_note_decryption(
+        &self,
+        position: u32,
+        output: &OutputDescription<[u8; 192]>,
+    ) -> Result<Option<MemoNote>> {
+        let domain = SaplingDomain::new(Zip212Enforcement::On);
+        if let Some((note, _pa, memo_bytes)) = try_note_decryption(&domain, &self.pivk, output) {
+            let nf = note.nf(&self.nk, position as u64);
+            let memo_note = MemoNote {
+                nf: nf.0,
+                memo: memo_text(&memo_bytes)?,
+            };
+            return Ok(Some(memo_note));
         }
         Ok(None)
     }
@@ -290,7 +344,14 @@ impl Pool for Orchard {
 }
 
 impl Decode<Orchard> for Decoder<Orchard> {
-    fn try_compact_note_decryption(&self, action: &CompactOrchardAction) -> bool {
+    fn try_compact_note_decryption(
+        &self,
+        network: &Network,
+        height: u32,
+        txid: &[u8],
+        position: u32,
+        action: &CompactOrchardAction,
+    ) -> Result<Option<ReceivedNote>> {
         let epk: &[u8; 32] = action.ephemeral_key.as_slice().try_into().unwrap();
         let ca = CompactAction::from_parts(
             Nullifier::from_bytes(action.nullifier.as_slice().try_into().unwrap()).unwrap(),
@@ -299,20 +360,7 @@ impl Decode<Orchard> for Decoder<Orchard> {
             action.ciphertext.as_slice().try_into().unwrap(),
         );
         let domain = OrchardDomain::for_compact_action(&ca);
-        try_compact_note_decryption(&domain, &self.pivk, &ca).is_some()
-    }
-
-    fn try_note_decryption(
-        &self,
-        network: &Network,
-        height: u32,
-        txid: &Hash,
-        position: u32,
-        action: &Action<Signature<SpendAuth>>,
-    ) -> Result<Option<ReceivedNote>> {
-        let domain = OrchardDomain::for_action(action);
-        if let Some((note, address, memo_bytes)) = try_note_decryption(&domain, &self.pivk, action)
-        {
+        if let Some((note, address)) = try_compact_note_decryption(&domain, &self.pivk, &ca) {
             let ua = unified::Receiver::Orchard(address.to_raw_address_bytes());
             let ua = unified::Address::try_from_items(vec![ua])?;
             let ua = ua.encode(&network.network_type());
@@ -322,7 +370,7 @@ impl Decode<Orchard> for Decoder<Orchard> {
             let nf = note.nullifier(&self.nk);
             let rho = note.rho().to_bytes();
             let note = ReceivedNote {
-                txid: *txid,
+                txid: txid.try_into().unwrap(),
                 position,
                 height,
                 address: ua,
@@ -331,9 +379,26 @@ impl Decode<Orchard> for Decoder<Orchard> {
                 rcm,
                 nf: nf.to_bytes(),
                 rho: Some(rho),
-                memo: memo_text(&memo_bytes)?,
             };
             return Ok(Some(note));
+        }
+        Ok(None)
+    }
+
+    fn try_note_decryption(
+        &self,
+        _position: u32,
+        action: &Action<Signature<SpendAuth>>,
+    ) -> Result<Option<MemoNote>> {
+        let domain = OrchardDomain::for_action(action);
+        if let Some((note, _address, memo_bytes)) = try_note_decryption(&domain, &self.pivk, action)
+        {
+            let nf = note.nullifier(&self.nk);
+            let memo_note = MemoNote {
+                nf: nf.to_bytes(),
+                memo: memo_text(&memo_bytes)?,
+            };
+            return Ok(Some(memo_note));
         }
 
         Ok(None)
@@ -413,31 +478,30 @@ mod tests {
             hex::decode("5f03d35ae940bb840564c3b7af7ab72255096d3eca15c910c0e40d0000000000")
                 .unwrap();
         let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&Network::Main, FVK).unwrap();
-        let sap_dec = ufvk.sapling().map(|fvk| {
+        let mut sap_dec = ufvk.sapling().map(|fvk| {
             let nk = fvk.fvk().vk.nk;
             let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
             let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
-            Decoder::<Sapling>::new(nk, pivk)
+            Decoder::<Sapling>::new(nk, pivk, vec![])
         });
-        let orc_dec = ufvk.orchard().map(|fvk| {
+        let mut orc_dec = ufvk.orchard().map(|fvk| {
             let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
             let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
-            Decoder::<Orchard>::new(fvk.clone(), pivk)
+            Decoder::<Orchard>::new(fvk.clone(), pivk, vec![])
         });
 
-        let txs = scan(
+        let events = scan(
+            &Network::Main,
             &mut client,
             2_890_000,
             2_900_000,
             &prev_hash.try_into().unwrap(),
-            &sap_dec,
-            &orc_dec,
+            &mut sap_dec,
+            &mut orc_dec,
         )
         .await?;
 
-        let notes = scan_txs(&Network::Main, &mut client, &txs, &sap_dec, &orc_dec).await?;
-
-        println!("{notes:?}");
+        println!("{events:?}");
 
         Ok(())
     }
