@@ -6,10 +6,10 @@ use crate::Hash;
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
+use std::collections::HashMap;
 use zcash_keys::address::UnifiedAddress;
 use zcash_keys::encoding::AddressCodec;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey};
-use std::collections::HashMap;
 use zcash_primitives::consensus::{NetworkUpgrade, Parameters};
 
 pub struct Db {
@@ -42,7 +42,15 @@ impl Db {
             .await?;
         let id_account = id_account.map(|id| id + 1).unwrap_or(0);
         let (diversifier_index, address) = self.next_diversifier(&mut connection).await?;
-        self.store_receivers(&mut connection, name, id_account, 0, diversifier_index, &address).await?;
+        self.store_receivers(
+            &mut connection,
+            name,
+            id_account,
+            0,
+            diversifier_index,
+            &address,
+        )
+        .await?;
 
         let account = Account {
             account_index: id_account,
@@ -60,7 +68,15 @@ impl Db {
                 .await?;
         let id_sub_account = id_sub_account + 1;
         let (diversifier_index, address) = self.next_diversifier(&mut connection).await?;
-        self.store_receivers(&mut connection, name, id_account, id_sub_account, diversifier_index, &address).await?;
+        self.store_receivers(
+            &mut connection,
+            name,
+            id_account,
+            id_sub_account,
+            diversifier_index,
+            &address,
+        )
+        .await?;
 
         let sub_account = SubAccount {
             account_index: id_account,
@@ -70,10 +86,15 @@ impl Db {
         Ok(sub_account)
     }
 
-    async fn store_receivers(&self, connection: &mut SqliteConnection,
-        name: &str, id_account: u32, id_sub_account: u32,
+    async fn store_receivers(
+        &self,
+        connection: &mut SqliteConnection,
+        name: &str,
+        id_account: u32,
+        id_sub_account: u32,
         diversifier_index: u64,
-        address: &str) -> Result<()> {
+        address: &str,
+    ) -> Result<()> {
         let r = sqlx::query("INSERT INTO addresses(label, account, sub_account, address, diversifier_index) VALUES (?1,?2,?3,?4,?5)")
             .bind(name)
             .bind(id_account)
@@ -88,7 +109,8 @@ impl Db {
         if let Some(address) = ua.sapling() {
             sqlx::query(
                 "INSERT INTO receivers(pool, id_address, receiver_address)
-                VALUES (1, ?1, ?2)")
+                VALUES (1, ?1, ?2)",
+            )
             .bind(id_address)
             .bind(address.encode(&self.network))
             .execute(&mut *connection)
@@ -98,7 +120,8 @@ impl Db {
             let ua = UnifiedAddress::from_receivers(Some(*address), None, None).unwrap();
             sqlx::query(
                 "INSERT INTO receivers(pool, id_address, receiver_address)
-                VALUES (2, ?1, ?2)")
+                VALUES (2, ?1, ?2)",
+            )
             .bind(id_address)
             .bind(ua.encode(&self.network))
             .execute(&mut *connection)
@@ -303,18 +326,18 @@ impl Db {
     }
 
     async fn next_diversifier(&self, connection: &mut SqliteConnection) -> Result<(u64, String)> {
-        let di =
-            sqlx::query("SELECT MAX(diversifier_index) FROM addresses")
-                .map(|r: SqliteRow| r.get::<Option<u64>, _>(0))
-                .fetch_one(&mut *connection)
-                .await?.map(|di| di + 1).unwrap_or_default();
-        let (ua, ndi) = self.ufvk.find_address(di.into(), UnifiedAddressRequest::AllAvailableKeys)?;
+        let di = sqlx::query("SELECT MAX(diversifier_index) FROM addresses")
+            .map(|r: SqliteRow| r.get::<Option<u64>, _>(0))
+            .fetch_one(&mut *connection)
+            .await?
+            .map(|di| di + 1)
+            .unwrap_or_default();
+        let (ua, ndi) = self
+            .ufvk
+            .find_address(di.into(), UnifiedAddressRequest::AllAvailableKeys)?;
         let ua = ua.encode(&self.network);
         let ndi: u64 = ndi.try_into().unwrap();
-        Ok((
-            ndi,
-            ua,
-        ))
+        Ok((ndi, ua))
     }
 
     pub async fn create(&self) -> Result<bool> {
@@ -373,6 +396,7 @@ impl Db {
             value INTEGER NOT NULL,
             rcm BLOB NOT NULL,
             nf BLOB NOT NULL UNIQUE,
+            rho BLOB,
             memo TEXT,
             spent INTEGER,
             CONSTRAINT tx_output UNIQUE (position))",
@@ -385,9 +409,7 @@ impl Db {
             .await?
             .is_none()
         {
-            sqlx::query("ALTER TABLE received_notes ADD COLUMN rho BLOB")
-            .execute(&mut *connection)
-            .await?;
+            panic!("Old database schema. This version is not compatible with it.");
         }
 
         let r = sqlx::query("SELECT 1 FROM addresses")
@@ -475,7 +497,8 @@ impl Db {
 
                             sqlx::query(
                                 "INSERT INTO receivers(pool, id_address, receiver_address)
-                                VALUES (?1, ?2, ?3)")
+                                VALUES (?1, ?2, ?3)",
+                            )
                             .bind(received_note.pool)
                             .bind(id_address)
                             .bind(&received_note.address)
