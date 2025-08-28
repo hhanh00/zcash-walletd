@@ -25,7 +25,7 @@ pub async fn scan(
     start: u32,
     end: u32,
     prev_hash: &Hash,
-    ufvk: UnifiedFullViewingKey,
+    ufvk: &UnifiedFullViewingKey,
 ) -> Result<Vec<WalletTx>> {
     let mut client = CompactTxStreamerClient::connect(lwd_url.to_string()).await?;
 
@@ -39,12 +39,12 @@ pub async fn scan(
     let sap_dec = ufvk.sapling().map(|fvk| {
         let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
         let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
-        Decoder::<Sapling>::new(get_tree_size(&tree_state.sapling_tree).unwrap(), pivk)
+        Decoder::<Sapling>::new(pivk)
     });
     let orc_dec = ufvk.orchard().map(|fvk| {
         let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
         let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
-        Decoder::<Orchard>::new(get_tree_size(&tree_state.sapling_tree).unwrap(), pivk)
+        Decoder::<Orchard>::new(pivk)
     });
 
     let mut blocks = client
@@ -62,26 +62,24 @@ pub async fn scan(
         .await?
         .into_inner();
     let mut prev_hash = *prev_hash;
-    let mut sap_position = 0;
-    let mut orc_position = 0;
+    let mut sap_position = get_tree_size(&tree_state.sapling_tree).unwrap();
+    let mut orc_position = get_tree_size(&tree_state.orchard_tree).unwrap();
 
     let mut txs = vec![];
     while let Ok(Some(block)) = blocks.message().await {
         let block_prev_hash: Hash = block.prev_hash.try_into().unwrap();
         if prev_hash != block_prev_hash {
+            println!("{} {}", block.height, hex::encode(block_prev_hash));
             anyhow::bail!("Reorg detected");
         }
-        prev_hash = block_prev_hash;
+        prev_hash = block.hash.try_into().unwrap();
 
         for vtx in block.vtx.iter() {
+            let mut found = false;
             if let Some(sap_dec) = &sap_dec {
                 for o in vtx.outputs.iter() {
                     if sap_dec.try_compact_note_decryption(o) {
-                        txs.push(WalletTx {
-                            txid: vtx.hash.clone().try_into().unwrap(),
-                            sap_position,
-                            orc_position,
-                        });
+                        found = true;
                     }
                 }
             }
@@ -89,14 +87,21 @@ pub async fn scan(
             if let Some(orc_dec) = &orc_dec {
                 for o in vtx.actions.iter() {
                     if orc_dec.try_compact_note_decryption(o) {
-                        txs.push(WalletTx {
-                            txid: vtx.hash.clone().try_into().unwrap(),
-                            sap_position,
-                            orc_position,
-                        });
+                        found = true;
                     }
                 }
             }
+
+            if found {
+                let tx = WalletTx {
+                    txid: vtx.hash.clone().try_into().unwrap(),
+                    sap_position,
+                    orc_position,
+                };
+                println!("{tx:?}");
+                txs.push(tx);
+            }
+
             sap_position += vtx.outputs.len() as u32;
             orc_position += vtx.actions.len() as u32;
         }
@@ -107,6 +112,7 @@ pub async fn scan(
 
 pub fn get_tree_size(tree: &str) -> Result<u32> {
     let tree = hex::decode(tree)?;
+    if tree.is_empty() { return Ok(0); }
     let tree = read_commitment_tree::<DummyNode, _, 32>(&*tree)?;
 
     Ok(tree.size() as u32)
@@ -129,13 +135,12 @@ pub trait Decode<P: Pool> {
 }
 
 pub struct Decoder<P: Pool> {
-    pub position: u32,
     pub pivk: P::PreparedIncomingViewingKey,
 }
 
 impl<P: Pool> Decoder<P> {
-    pub fn new(position: u32, pivk: P::PreparedIncomingViewingKey) -> Self {
-        Self { position, pivk }
+    pub fn new(pivk: P::PreparedIncomingViewingKey) -> Self {
+        Self { pivk }
     }
 }
 
@@ -206,8 +211,35 @@ impl ShieldedOutput<SaplingDomain, 52> for CompactSaplingOutput {
     }
 }
 
+#[derive(Debug)]
 pub struct WalletTx {
     pub txid: Hash,
     pub sap_position: u32,
     pub orc_position: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+
+    const FVK: &str = "uview1s5ranpd74zd2pseylw0fmt0cnudf9765mwjjd9mqf8tvjq2nlw9vgypzqayfvs7aeedguwl4r7exz50nrw6llfs3n9xfd4sm2slaay7smysc4yjyuwu3z7n5ccvyw70qkw28yt6xwra6c8d20ewpjeqq4enmftyly3fmn78hwwkyffp2y4x2vk8050vcly8y5fuse5s9e5j4wmwuldemxahrp4zrgatj63mnpqlpacvcudqfsm5ee29pj8lr5wt93eyrx3fwa64m6505cge6n46c7eqw59e0n3m9rmsntcflfmu9wyjgfk2pmjf4npkml93vyq0fps2rh4mdwpz4ld059m6mamjht99j7sdypwx52lj6lvrfgwja4uf7qy2g8d6gkmvkh7u4dksq5gazxvye4gtwfgwmuygg2sqmkkf4fjd3ymf0mq99rhf0trsl0lpddw64r4n7jj7mxy6fcpj64vkx0pre2lla9p8nknrt2c33zy3vaczd";
+
+    #[tokio::test]
+    async fn test() -> Result<()> {
+        let prev_hash =
+            hex::decode("5f03d35ae940bb840564c3b7af7ab72255096d3eca15c910c0e40d0000000000")
+                .unwrap();
+        scan(
+            &Network::Main,
+            "https://zec.rocks",
+            2_890_000,
+            2_900_000,
+            &prev_hash.try_into().unwrap(),
+            &UnifiedFullViewingKey::decode(&Network::Main, FVK).unwrap(),
+        )
+        .await?;
+
+        Ok(())
+    }
 }
