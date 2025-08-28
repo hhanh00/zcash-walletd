@@ -12,12 +12,12 @@ zcash-cli --datadir=regtest z_getoperationresult
 zcash-cli --datadir=regtest generate 10
 sleep 1
 zcash-cli --datadir=regtest z_sendmany $UA '[{"address": "uregtest1xrgsdqnrf69lspz6etq6mlnm7pkpkuaulr30u0avrffr56dyfktprw309vxs8q3tlm0yq9x8kvm7348et08xnwqg2swgd2482rkg0l0jywkrhvldesvwhw3wxgcnjeem4vstv0x4je2ypk5q4fwnhzlaefjnpscunzrfd03eqgz5cf0v", "amount": 5.40}]' 1 null 'AllowRevealedRecipients'
-sleep 5
+sleep 10
 zcash-cli --datadir=regtest z_getoperationresult
 zcash-cli --datadir=regtest generate 10
 sleep 1
 zcash-cli --datadir=regtest z_sendmany $UA '[{"address": "zregtestsapling1qag0mpkwcratr9zweyk973dzukaln3svpl0v8fpydajq8aq8ghsq0ah3my0qc2admygg6xt4snh", "amount": 1.20}]' 1 null 'AllowRevealedRecipients'
-sleep 5
+sleep 10
 zcash-cli --datadir=regtest z_getoperationresult
 zcash-cli --datadir=regtest generate 10
 

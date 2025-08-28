@@ -67,3 +67,31 @@ describe('POST /create_address - exact match', function () {
     });
   });
 });
+
+describe('POST /request_scan', function () {
+  this.timeout(5000); // increase timeout if needed
+  it('should detect transfers', async function () {
+    const res = await request
+      .post('http://localhost:8000/request_scan')
+      .send({});
+
+    expect(res.status).to.equal(200);
+
+    const res2 = await request
+      .post('http://localhost:8000/get_transfers')
+      .send({
+        "account_index": 0, "in": true, "subaddr_indices": [0]
+      });
+    const incoming = res2.body.in;
+    expect(incoming[0].address).to.equal("uregtest1av9vk3kqw6fepl3t2h9ra98ymzvq4xhq0rudsqt7s4k9xmlmwt6mfk8zpscvqjvu3atu679llpp98wc2wt3myvgzhf8ufpk82q3fvxnh");
+    expect(incoming[0].amount).to.equal(540000000);
+    expect(incoming[0].height).to.equal(161);
+    expect(incoming[0].subaddr_index.major).to.equal(0);
+    expect(incoming[0].subaddr_index.minor).to.equal(0);
+    expect(incoming[1].address).to.equal("zregtestsapling1qag0mpkwcratr9zweyk973dzukaln3svpl0v8fpydajq8aq8ghsq0ah3my0qc2admygg6xt4snh");
+    expect(incoming[1].amount).to.equal(120000000);
+    expect(incoming[1].height).to.equal(171);
+    expect(incoming[1].subaddr_index.major).to.equal(0);
+    expect(incoming[1].subaddr_index.minor).to.equal(0);
+  });
+});
