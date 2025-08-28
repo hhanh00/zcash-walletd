@@ -1,8 +1,8 @@
 use crate::account::{Account, AccountBalance, SubAccount};
 use crate::network::Network;
-use crate::scan::DecryptedNote;
-use crate::scan2::ScanEvent;
+use crate::scan::ScanEvent;
 use crate::transaction::{SubAddress, Transfer};
+use crate::Hash;
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
@@ -115,64 +115,6 @@ impl Db {
             .await?;
 
         Ok(sub_accounts)
-    }
-
-    pub async fn store_note(&self, note: &DecryptedNote, id_tx: u32) -> Result<u32> {
-        let mut connection = self.pool.acquire().await?;
-        let r = sqlx::query("SELECT account, sub_account FROM addresses WHERE address = ?1")
-            .bind(&note.address)
-            .map(|row: SqliteRow| {
-                let account: u32 = row.get(0);
-                let sub_account: u32 = row.get(1);
-                (account, sub_account)
-            })
-            .fetch_optional(&mut *connection)
-            .await?;
-        let (account, sub_account) = match r {
-            Some((a, s)) => (Some(a), Some(s)),
-            None => (None, None),
-        };
-
-        let r = sqlx::query(
-            "INSERT INTO received_notes(id_tx, address, position, height, diversifier, value, rcm, nf, memo, account, sub_account) \
-            SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11")
-            .bind(id_tx)
-            .bind(&note.address)
-            .bind(note.position as u32)
-            .bind(note.height)
-            .bind(note.diversifier.to_vec())
-            .bind(note.value as i64)
-            .bind(note.rcm.to_vec())
-            .bind(note.nf.to_vec())
-            .bind(&note.memo)
-            .bind(account)
-            .bind(sub_account)
-            .execute(&mut *connection)
-            .await?;
-        let id_note = r.last_insert_rowid();
-        Ok(id_note as u32)
-    }
-
-    pub async fn store_tx(&self, txid: &[u8], height: u32, value: i64) -> Result<u32> {
-        let mut connection = self.pool.acquire().await?;
-        let r = sqlx::query("INSERT INTO transactions(txid, height, value) VALUES (?1,?2,?3)")
-            .bind(txid)
-            .bind(height)
-            .bind(value)
-            .execute(&mut *connection)
-            .await?;
-        let id_tx = r.last_insert_rowid() as u32;
-        Ok(id_tx)
-    }
-
-    pub async fn store_block(&self, height: u32, hash: &[u8]) -> Result<()> {
-        let mut connection = self.pool.acquire().await?;
-        sqlx::query("INSERT INTO blocks(height, hash) VALUES (?1,?2)")
-            .bind(height)
-            .bind(hash)
-            .execute(&mut *connection)
-            .await?;
-        Ok(())
     }
 
     pub async fn get_synced_height(&self) -> Result<u32> {
@@ -325,23 +267,22 @@ impl Db {
         Ok(())
     }
 
-    pub async fn get_nfs(&self) -> Result<HashMap<[u8; 32], u32>> {
+    pub async fn get_nfs(&self) -> Result<HashMap<[u8; 32], u64>> {
         let mut connection = self.pool.acquire().await?;
 
-        let nfs = sqlx::query("SELECT id_note, nf FROM received_notes WHERE spent IS NULL")
+        let nfs = sqlx::query("SELECT nf, value FROM received_notes WHERE spent IS NULL")
             .map(|row: SqliteRow| {
-                let id_note: u32 = row.get(0);
-                let nf: Vec<u8> = row.get(1);
-                let mut nf_bytes = [0u8; 32];
-                nf_bytes.copy_from_slice(&nf);
-                (id_note, nf_bytes)
+                let nf: Vec<u8> = row.get(0);
+                let value: u64 = row.get(1);
+                let nf: Hash = nf.try_into().unwrap();
+                (nf, value)
             })
             .fetch_all(&mut *connection)
             .await?;
 
-        let mut nf_map = HashMap::<[u8; 32], u32>::new();
-        for (id_note, nf) in nfs {
-            nf_map.insert(nf, id_note);
+        let mut nf_map = HashMap::new();
+        for (nf, value) in nfs {
+            nf_map.insert(nf, value);
         }
         Ok(nf_map)
     }

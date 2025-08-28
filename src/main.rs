@@ -4,20 +4,29 @@ extern crate rocket;
 #[path = "generated/cash.z.wallet.sdk.rpc.rs"]
 pub mod lwd_rpc;
 
-mod network;
 mod account;
 mod db;
+mod monitor;
+mod network;
 mod rpc;
 mod scan;
 mod transaction;
-pub mod scan2;
 
-use anyhow::{anyhow, Result};
-use tracing::level_filters::LevelFilter;
-use tracing_subscriber::{fmt::{self, format::FmtSpan}, layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer, Registry};
-use std::str::FromStr;
 pub use crate::rpc::*;
+use anyhow::{anyhow, Result};
 use network::Network;
+use std::str::FromStr;
+use tonic::{transport::Channel, Request};
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::{
+    fmt::{self, format::FmtSpan},
+    layer::SubscriberExt as _,
+    util::SubscriberInitExt as _,
+    EnvFilter, Layer, Registry,
+};
+
+pub type Hash = [u8; 32];
+pub type Client = CompactTxStreamerClient<Channel>;
 
 use clap::Parser;
 
@@ -36,12 +45,16 @@ struct Args {
 // pub const LWD_URL: &str = "https://lite.ycash.xyz:9067";
 // pub const NOTIFY_TX_URL: &str = "https://localhost:14142/zcashlikedaemoncallback/tx?cryptoCode=yec&hash=";
 
-use crate::db::Db;
+use crate::{
+    db::Db,
+    lwd_rpc::{compact_tx_streamer_client::CompactTxStreamerClient, BlockId},
+    monitor::monitor_task,
+    scan::ScanEvent,
+};
 use anyhow::Context;
-use zcash_client_backend::keys::UnifiedFullViewingKey;
-use crate::scan::monitor_task;
 use rocket::fairing::AdHoc;
 use serde::Deserialize;
+use zcash_client_backend::keys::UnifiedFullViewingKey;
 
 #[derive(Deserialize)]
 pub struct WalletConfig {
@@ -59,8 +72,7 @@ impl WalletConfig {
     pub fn network(&self) -> Network {
         if self.regtest {
             Network::Regtest
-        }
-        else {
+        } else {
             Network::Main
         }
     }
@@ -74,7 +86,6 @@ async fn main() -> Result<()> {
         .with(default_layer())
         .with(env_layer())
         .try_init();
-    let args: Args = Args::parse();
     let rocket = rocket::build();
     let figment = rocket.figment();
     let mut config: WalletConfig = figment.extract().unwrap();
@@ -85,23 +96,35 @@ async fn main() -> Result<()> {
     assert!(config.orchard);
 
     let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
-    let ufvk = UnifiedFullViewingKey::decode(&network, &ufvk).map_err(|_| anyhow!("Invalid Unified Viewing Key"))?;
+    let ufvk = UnifiedFullViewingKey::decode(&network, &ufvk)
+        .map_err(|_| anyhow!("Invalid Unified Viewing Key"))?;
     if let Some(notify_tx_url) = notify_tx_url {
         config.notify_tx_url = notify_tx_url;
     }
+    let birth_height = dotenv::var("BIRTH_HEIGHT")
+        .ok()
+        .map(|h| u32::from_str(&h).unwrap())
+        .expect("Birth Height MUST be specified");
     let db = Db::new(network, &config.db_path, &ufvk).await?;
     let db_exists = db.create().await?;
     if !db_exists {
         db.new_account("").await?;
+        let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone()).await?;
+        let b = client
+            .get_block(Request::new(BlockId {
+                height: birth_height as u64,
+                hash: vec![],
+            }))
+            .await?
+            .into_inner();
+        let hash: Hash = b.hash.try_into().unwrap();
+        db.store_events(&[ScanEvent::Block(birth_height, hash)])
+            .await?;
     }
-    let birth_height =
-        if !db_exists || args.rescan {
-            dotenv::var("BIRTH_HEIGHT").ok().map(|h| u32::from_str(&h).unwrap())
-        }
-    else { None };
 
-    monitor_task(birth_height, config.port, config.poll_interval).await;
-    rocket.manage(db)
+    monitor_task(config.port, config.poll_interval).await;
+    rocket
+        .manage(db)
         .mount(
             "/",
             routes![
@@ -117,7 +140,8 @@ async fn main() -> Result<()> {
             ],
         )
         .attach(AdHoc::config::<WalletConfig>())
-        .launch().await?;
+        .launch()
+        .await?;
 
     Ok(())
 }
