@@ -12,16 +12,14 @@ mod scan;
 mod transaction;
 pub mod scan2;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{fmt::{self, format::FmtSpan}, layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer, Registry};
-use zcash_address::unified::{self, Encoding, Ufvk};
 use std::str::FromStr;
 pub use crate::rpc::*;
 use network::Network;
 
 use clap::Parser;
-use zcash_protocol::consensus::NetworkConstants as _;
 
 #[derive(Parser, Debug)]
 #[clap(about, version, author)]
@@ -40,13 +38,10 @@ struct Args {
 
 use crate::db::Db;
 use anyhow::Context;
-use std::sync::Mutex;
-use zcash_client_backend::{encoding::decode_extended_full_viewing_key, keys::UnifiedFullViewingKey};
+use zcash_client_backend::keys::UnifiedFullViewingKey;
 use crate::scan::monitor_task;
 use rocket::fairing::AdHoc;
 use serde::Deserialize;
-
-pub struct FVK(pub Mutex<UnifiedFullViewingKey>);
 
 #[derive(Deserialize)]
 pub struct WalletConfig {
@@ -83,21 +78,18 @@ async fn main() -> Result<()> {
     let rocket = rocket::build();
     let figment = rocket.figment();
     let mut config: WalletConfig = figment.extract().unwrap();
-    let fvk = dotenv::var("VK")
+    let ufvk = dotenv::var("VK")
         .context("Seed missing from .env file")
         .unwrap();
     let network = config.network();
-    tracing::info!("Orchard = {}", config.orchard);
+    assert!(config.orchard);
 
     let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
-    let fvk = decode_extended_full_viewing_key(network.hrp_sapling_extended_full_viewing_key(), &fvk).expect("Invalid viewing key");
+    let ufvk = UnifiedFullViewingKey::decode(&network, &ufvk).map_err(|_| anyhow!("Invalid Unified Viewing Key"))?;
     if let Some(notify_tx_url) = notify_tx_url {
         config.notify_tx_url = notify_tx_url;
     }
-    let db = Db::new(network, &config.db_path, &fvk).await?;
-    let sfvk = unified::Fvk::Sapling(fvk.to_diversifiable_full_viewing_key().to_bytes());
-    let ufvk = Ufvk::try_from_items(vec![sfvk])?;
-    let fvk = FVK(Mutex::new(UnifiedFullViewingKey::parse(&ufvk)?));
+    let db = Db::new(network, &config.db_path, &ufvk).await?;
     let db_exists = db.create().await?;
     if !db_exists {
         db.new_account("").await?;
@@ -109,7 +101,7 @@ async fn main() -> Result<()> {
     else { None };
 
     monitor_task(birth_height, config.port, config.poll_interval).await;
-    rocket.manage(db).manage(fvk)
+    rocket.manage(db)
         .mount(
             "/",
             routes![

@@ -523,7 +523,6 @@ mod tests {
 
     use super::*;
     use anyhow::Result;
-    use sqlx::SqlitePool;
 
     const FVK: &str = "uview1s5ranpd74zd2pseylw0fmt0cnudf9765mwjjd9mqf8tvjq2nlw9vgypzqayfvs7aeedguwl4r7exz50nrw6llfs3n9xfd4sm2slaay7smysc4yjyuwu3z7n5ccvyw70qkw28yt6xwra6c8d20ewpjeqq4enmftyly3fmn78hwwkyffp2y4x2vk8050vcly8y5fuse5s9e5j4wmwuldemxahrp4zrgatj63mnpqlpacvcudqfsm5ee29pj8lr5wt93eyrx3fwa64m6505cge6n46c7eqw59e0n3m9rmsntcflfmu9wyjgfk2pmjf4npkml93vyq0fps2rh4mdwpz4ld059m6mamjht99j7sdypwx52lj6lvrfgwja4uf7qy2g8d6gkmvkh7u4dksq5gazxvye4gtwfgwmuygg2sqmkkf4fjd3ymf0mq99rhf0trsl0lpddw64r4n7jj7mxy6fcpj64vkx0pre2lla9p8nknrt2c33zy3vaczd";
 
@@ -560,8 +559,9 @@ mod tests {
 
         println!("{events:?}");
 
-        let pool = SqlitePool::connect("zec-wallet-test.db").await?;
-        Db::store_events(&pool, &events).await?;
+        let db = Db::new(Network::Main, "zec-wallet-test.db",
+            &ufvk).await?;
+        db.store_events(&events).await?;
 
         Ok(())
     }

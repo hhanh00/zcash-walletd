@@ -9,7 +9,7 @@ use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::State;
 use sapling_crypto::keys::PreparedIncomingViewingKey;
 use crate::scan::{scan_blocks, scan_transaction, get_latest_height};
-use crate::{FVK, from_tonic, WalletConfig};
+use crate::{from_tonic, WalletConfig};
 use tokio_stream::StreamExt;
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
 use tonic::Request;
@@ -234,14 +234,12 @@ pub struct ScanResponse {}
 pub async fn request_scan(
     request: Json<ScanRequest>,
     db: &State<Db>,
-    fvk: &State<FVK>,
     config: &State<WalletConfig>,
 ) -> Result<Json<ScanResponse>, Debug<anyhow::Error>> {
     let network = config.network();
     let request = request.into_inner();
-    let fvk = fvk.0.lock().unwrap().clone();
-
-    let res = scan(network, fvk, request.start_height, db, config).await;
+    let ufvk = db.ufvk();
+    let res = scan(network, ufvk, request.start_height, db, config).await;
     if let Err(error) = res { // Rewind if we hit a chain reorg but don't error
         match error.root_cause().downcast_ref::<ScanError>() {
             Some(ScanError::Reorganization) => {
@@ -255,7 +253,7 @@ pub async fn request_scan(
     Ok(Json(rep))
 }
 
-pub async fn scan(network: Network, fvk: UnifiedFullViewingKey, start_height: Option<u32>, db: &State<Db>, config: &State<WalletConfig>) -> Result<()> {
+pub async fn scan(network: Network, fvk: &UnifiedFullViewingKey, start_height: Option<u32>, db: &State<Db>, config: &State<WalletConfig>) -> Result<()> {
     let vk = &fvk.sapling().unwrap().fvk().vk;
     let ivk = vk.ivk();
     let pivk = PreparedIncomingViewingKey::new(&ivk);
