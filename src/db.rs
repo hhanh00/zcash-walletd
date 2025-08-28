@@ -1,11 +1,12 @@
 use crate::account::{Account, AccountBalance, SubAccount};
 use crate::network::Network;
 use crate::scan::DecryptedNote;
+use crate::scan2::ScanEvent;
 use crate::transaction::{SubAddress, Transfer};
 use anyhow::Result;
 use sapling_crypto::zip32::ExtendedFullViewingKey;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
-use sqlx::{Row, SqliteConnection, SqlitePool};
+use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
 use std::collections::HashMap;
 use zcash_client_backend::encoding::encode_payment_address;
 use zcash_primitives::consensus::{NetworkConstants as _, NetworkUpgrade, Parameters};
@@ -424,11 +425,156 @@ impl Db {
         .execute(&mut *connection)
         .await?;
 
+        if sqlx::query("SELECT 1 FROM pragma_table_info('received_notes') WHERE name = 'rho'")
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_none()
+        {
+            sqlx::query("ALTER TABLE received_notes ADD COLUMN rho BLOB")
+            .execute(&mut *connection)
+            .await?;
+        }
+
         let r = sqlx::query("SELECT 1 FROM addresses")
             .map(|r: SqliteRow| r.get::<u32, _>(0))
             .fetch_optional(&mut *connection)
             .await?;
 
         Ok(r.is_some())
+    }
+
+    pub async fn store_events(pool: &SqlitePool, events: &[ScanEvent]) -> Result<()> {
+        let mut connection = pool.acquire().await?;
+        let mut db_tx = connection.begin().await?;
+
+        for event in events {
+            match event {
+                ScanEvent::Received(received_note) => {
+                    let txid = &received_note.txid;
+                    let id_tx = match sqlx::query("SELECT id_tx FROM transactions WHERE txid = ?1")
+                        .bind(txid.as_slice())
+                        .map(|r: SqliteRow| r.get::<u32, _>(0))
+                        .fetch_optional(&mut *db_tx)
+                        .await?
+                    {
+                        Some(id_tx) => id_tx,
+                        None => {
+                            let r = sqlx::query(
+                                "INSERT INTO transactions(txid, height, value) VALUES (?1, ?2, 0)",
+                            )
+                            .bind(txid.as_slice())
+                            .bind(received_note.height)
+                            .execute(&mut *db_tx)
+                            .await?;
+                            let id_tx = r.last_insert_rowid();
+                            id_tx as u32
+                        }
+                    };
+                    let (account, sub_account) = match sqlx::query(
+                        "SELECT account, sub_account FROM addresses WHERE address = ?1",
+                    )
+                    .bind(&received_note.address)
+                    .map(|r: SqliteRow| {
+                        let account: u32 = r.get(0);
+                        let sub_account: u32 = r.get(1);
+                        (account, sub_account)
+                    })
+                    .fetch_optional(&mut *db_tx)
+                    .await?
+                    {
+                        Some(x) => x,
+                        None => {
+                            let account = sqlx::query("SELECT MAX(account) FROM addresses")
+                                .map(|r: SqliteRow| {
+                                    let account: Option<u32> = r.get(0);
+                                    account.unwrap_or_default()
+                                })
+                                .fetch_one(&mut *db_tx)
+                                .await?;
+                            let sub_account = sqlx::query(
+                                "SELECT MAX(sub_account) FROM addresses WHERE account = ?1",
+                            )
+                            .bind(account)
+                            .map(|r: SqliteRow| {
+                                let sub_account: Option<u32> = r.get(0);
+                                sub_account.map(|x| x + 1).unwrap_or_default()
+                            })
+                            .fetch_optional(&mut *db_tx)
+                            .await?
+                            .unwrap_or_default();
+
+                            sqlx::query(
+                                "INSERT INTO addresses
+                            (label, account, sub_account, address, diversifier_index)
+                            VALUES ('', ?1, ?2, ?3, ?4)",
+                            )
+                            .bind(account)
+                            .bind(sub_account)
+                            .bind(&received_note.address)
+                            .bind(received_note.diversifier_index.unwrap_or_default() as u32)
+                            .execute(&mut *db_tx)
+                            .await?;
+                            (account, sub_account)
+                        }
+                    };
+
+                    sqlx::query(
+                        "INSERT INTO received_notes
+                        (address, account, sub_account, id_tx, position, height,
+                        diversifier, value, rcm, nf, rho, memo, spent)
+                        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'',0)",
+                    )
+                    .bind(&received_note.address)
+                    .bind(account)
+                    .bind(sub_account)
+                    .bind(id_tx)
+                    .bind(received_note.position)
+                    .bind(received_note.height)
+                    .bind(received_note.diversifier.as_slice())
+                    .bind(received_note.value as i64)
+                    .bind(received_note.rcm.as_slice())
+                    .bind(received_note.nf.as_slice())
+                    .bind(received_note.rho.map(|r| r.to_vec()))
+                    .execute(&mut *db_tx)
+                    .await?;
+                    sqlx::query("UPDATE transactions SET value = value + ?2 WHERE txid = ?1")
+                        .bind(received_note.txid.as_slice())
+                        .bind(received_note.value as i64)
+                        .execute(&mut *db_tx)
+                        .await?;
+                }
+                ScanEvent::Spent(spent_note) => {
+                    sqlx::query("UPDATE received_notes SET spent = TRUE WHERE nf = ?1")
+                        .bind(spent_note.nf.as_slice())
+                        .execute(&mut *db_tx)
+                        .await?;
+                    sqlx::query("UPDATE transactions SET value = value - ?2 WHERE txid = ?1")
+                        .bind(spent_note.txid.as_slice())
+                        .bind(spent_note.value as i64)
+                        .execute(&mut *db_tx)
+                        .await?;
+                }
+                ScanEvent::Memo(memo_note) => {
+                    sqlx::query("UPDATE received_notes SET memo = ?2 WHERE nf = ?1")
+                        .bind(memo_note.nf.as_slice())
+                        .bind(&memo_note.memo)
+                        .execute(&mut *db_tx)
+                        .await?;
+                }
+                ScanEvent::Block(height, hash) => {
+                    sqlx::query(
+                        "INSERT INTO blocks(height, hash)
+                        VALUES (?1, ?2)",
+                    )
+                    .bind(*height)
+                    .bind(hash.as_slice())
+                    .execute(&mut *db_tx)
+                    .await?;
+                }
+            }
+        }
+        db_tx.commit().await?;
+
+        Ok(())
     }
 }

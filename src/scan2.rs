@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use anyhow::Result;
 use orchard::{
@@ -6,12 +6,13 @@ use orchard::{
     note::{ExtractedNoteCommitment, Nullifier},
     note_encryption::{CompactAction, OrchardDomain},
     primitives::redpallas::{Signature, SpendAuth},
-    Action,
+    Action, Address,
 };
 use sapling_crypto::{
     bundle::OutputDescription,
     note_encryption::{SaplingDomain, Zip212Enforcement},
-    NullifierDerivingKey,
+    zip32::DiversifiableFullViewingKey,
+    NullifierDerivingKey, PaymentAddress,
 };
 use tonic::{transport::Channel, Request};
 use zcash_address::unified::{self, Encoding};
@@ -90,20 +91,24 @@ pub async fn scan(
             if let Some(sap_dec) = sap_dec {
                 for i in vtx.spends.iter() {
                     let nf: &Hash = i.nf.as_slice().try_into().unwrap();
-                    if sap_dec.nfs.contains(nf) {
-                        events.push(ScanEvent::Spent(SpentNote { nf: *nf }));
+                    if let Some(value) = sap_dec.nfs.get(nf) {
+                        events.push(ScanEvent::Spent(SpentNote {
+                            nf: *nf,
+                            txid: vtx.hash.clone().try_into().unwrap(),
+                            value: *value,
+                        }));
                     }
                 }
 
-                for o in vtx.outputs.iter() {
+                for (vout, o) in vtx.outputs.iter().enumerate() {
                     if let Some(n) = sap_dec.try_compact_note_decryption(
                         network,
                         height,
                         &vtx.hash,
-                        sap_position,
+                        sap_position + vout as u32,
                         o,
                     )? {
-                        sap_dec.add_nf(n.nf);
+                        sap_dec.add_nf(n.nf, n.value);
                         events.push(ScanEvent::Received(n));
                         found = true;
                     }
@@ -111,19 +116,23 @@ pub async fn scan(
             }
 
             if let Some(orc_dec) = orc_dec {
-                for a in vtx.actions.iter() {
+                for (vout, a) in vtx.actions.iter().enumerate() {
                     let nf: &Hash = a.nullifier.as_slice().try_into().unwrap();
-                    if orc_dec.nfs.contains(nf) {
-                        events.push(ScanEvent::Spent(SpentNote { nf: *nf }));
+                    if let Some(value) = orc_dec.nfs.get(nf) {
+                        events.push(ScanEvent::Spent(SpentNote {
+                            nf: *nf,
+                            txid: vtx.hash.clone().try_into().unwrap(),
+                            value: *value,
+                        }));
                     }
                     if let Some(n) = orc_dec.try_compact_note_decryption(
                         network,
                         height,
                         &vtx.hash,
-                        orc_position,
+                        orc_position + vout as u32,
                         a,
                     )? {
-                        orc_dec.add_nf(n.nf);
+                        orc_dec.add_nf(n.nf, n.value);
                         events.push(ScanEvent::Received(n));
                         found = true;
                     }
@@ -151,6 +160,7 @@ pub async fn scan(
             events.push(ScanEvent::Memo(m));
         }
     }
+    events.push(ScanEvent::Block(end, prev_hash));
 
     Ok(events)
 }
@@ -210,8 +220,10 @@ pub fn get_tree_size(tree: &str) -> Result<u32> {
 }
 
 pub trait Pool {
+    type Address;
     type PreparedIncomingViewingKey;
     type NullifierKey;
+    type DiversifierKey;
     type CompactOutput;
     type Output;
 }
@@ -225,6 +237,7 @@ pub struct ReceivedNote {
     pub height: u32,
     pub address: String,
     pub diversifier: [u8; 11],
+    pub diversifier_index: Option<u64>,
     pub value: u64,
     pub rcm: Hash,
     pub nf: Hash,
@@ -240,18 +253,23 @@ pub struct MemoNote {
 #[derive(Debug)]
 pub struct SpentNote {
     pub nf: Hash,
+    pub txid: Hash,
+    pub value: u64,
 }
 
 #[derive(Debug)]
 pub enum ScanEvent {
+    Block(u32, Hash),
     Received(ReceivedNote),
     Spent(SpentNote),
     Memo(MemoNote),
 }
 
 impl Pool for Sapling {
+    type Address = PaymentAddress;
     type PreparedIncomingViewingKey = sapling_crypto::keys::PreparedIncomingViewingKey;
     type NullifierKey = NullifierDerivingKey;
+    type DiversifierKey = DiversifiableFullViewingKey;
     type CompactOutput = CompactSaplingOutput;
     type Output = OutputDescription<[u8; 192]>;
 }
@@ -266,21 +284,33 @@ pub trait Decode<P: Pool> {
         output: &P::CompactOutput,
     ) -> Result<Option<ReceivedNote>>;
     fn try_note_decryption(&self, position: u32, output: &P::Output) -> Result<Option<MemoNote>>;
+    fn decrypt_diversifier(&self, address: &P::Address) -> Result<Option<u64>>;
 }
 
 pub struct Decoder<P: Pool> {
     pub nk: P::NullifierKey,
+    pub dk: P::DiversifierKey,
     pub pivk: P::PreparedIncomingViewingKey,
-    pub nfs: HashSet<Hash>,
+    pub nfs: HashMap<Hash, u64>,
 }
 
 impl<P: Pool> Decoder<P> {
-    pub fn new(nk: P::NullifierKey, pivk: P::PreparedIncomingViewingKey, nfs: Vec<Hash>) -> Self {
-        Self { nk, pivk, nfs: nfs.into_iter().collect() }
+    pub fn new(
+        nk: P::NullifierKey,
+        dk: P::DiversifierKey,
+        pivk: P::PreparedIncomingViewingKey,
+        nfs: Vec<(Hash, u64)>,
+    ) -> Self {
+        Self {
+            nk,
+            dk,
+            pivk,
+            nfs: nfs.into_iter().collect(),
+        }
     }
 
-    pub fn add_nf(&mut self, nf: Hash) {
-        self.nfs.insert(nf);
+    pub fn add_nf(&mut self, nf: Hash, value: u64) {
+        self.nfs.insert(nf, value);
     }
 }
 
@@ -300,12 +330,15 @@ impl Decode<Sapling> for Decoder<Sapling> {
             let value = note.value().inner();
             let rcm = note.rcm().to_bytes();
             let nf = note.nf(&self.nk, position as u64);
+            let di = self.decrypt_diversifier(&pa)?;
+
             let note = ReceivedNote {
                 txid: txid.try_into().unwrap(),
                 position,
                 height,
                 address,
                 diversifier,
+                diversifier_index: di,
                 value,
                 rcm,
                 nf: nf.to_vec().try_into().unwrap(),
@@ -332,12 +365,22 @@ impl Decode<Sapling> for Decoder<Sapling> {
         }
         Ok(None)
     }
+
+    fn decrypt_diversifier(&self, address: &PaymentAddress) -> Result<Option<u64>> {
+        if let Some((di, _)) = self.dk.decrypt_diversifier(address) {
+            let di: u64 = di.try_into()?;
+            return Ok(Some(di));
+        }
+        Ok(None)
+    }
 }
 
 pub struct Orchard;
 
 impl Pool for Orchard {
+    type Address = Address;
     type NullifierKey = FullViewingKey;
+    type DiversifierKey = orchard::keys::IncomingViewingKey;
     type PreparedIncomingViewingKey = orchard::keys::PreparedIncomingViewingKey;
     type CompactOutput = CompactOrchardAction;
     type Output = Action<Signature<SpendAuth>>;
@@ -369,12 +412,15 @@ impl Decode<Orchard> for Decoder<Orchard> {
             let rcm = *note.rseed().as_bytes();
             let nf = note.nullifier(&self.nk);
             let rho = note.rho().to_bytes();
+            let di = self.decrypt_diversifier(&address)?;
+
             let note = ReceivedNote {
                 txid: txid.try_into().unwrap(),
                 position,
                 height,
                 address: ua,
                 diversifier,
+                diversifier_index: di,
                 value,
                 rcm,
                 nf: nf.to_bytes(),
@@ -401,6 +447,14 @@ impl Decode<Orchard> for Decoder<Orchard> {
             return Ok(Some(memo_note));
         }
 
+        Ok(None)
+    }
+
+    fn decrypt_diversifier(&self, address: &Address) -> Result<Option<u64>> {
+        if let Some(di) = self.dk.diversifier_index(address) {
+            let di: u64 = di.try_into()?;
+            return Ok(Some(di));
+        }
         Ok(None)
     }
 }
@@ -465,8 +519,11 @@ pub fn memo_text(memo_bytes: &[u8]) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::db::Db;
+
     use super::*;
     use anyhow::Result;
+    use sqlx::SqlitePool;
 
     const FVK: &str = "uview1s5ranpd74zd2pseylw0fmt0cnudf9765mwjjd9mqf8tvjq2nlw9vgypzqayfvs7aeedguwl4r7exz50nrw6llfs3n9xfd4sm2slaay7smysc4yjyuwu3z7n5ccvyw70qkw28yt6xwra6c8d20ewpjeqq4enmftyly3fmn78hwwkyffp2y4x2vk8050vcly8y5fuse5s9e5j4wmwuldemxahrp4zrgatj63mnpqlpacvcudqfsm5ee29pj8lr5wt93eyrx3fwa64m6505cge6n46c7eqw59e0n3m9rmsntcflfmu9wyjgfk2pmjf4npkml93vyq0fps2rh4mdwpz4ld059m6mamjht99j7sdypwx52lj6lvrfgwja4uf7qy2g8d6gkmvkh7u4dksq5gazxvye4gtwfgwmuygg2sqmkkf4fjd3ymf0mq99rhf0trsl0lpddw64r4n7jj7mxy6fcpj64vkx0pre2lla9p8nknrt2c33zy3vaczd";
 
@@ -482,12 +539,12 @@ mod tests {
             let nk = fvk.fvk().vk.nk;
             let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
             let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
-            Decoder::<Sapling>::new(nk, pivk, vec![])
+            Decoder::<Sapling>::new(nk, fvk.clone(), pivk, vec![])
         });
         let mut orc_dec = ufvk.orchard().map(|fvk| {
             let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
             let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
-            Decoder::<Orchard>::new(fvk.clone(), pivk, vec![])
+            Decoder::<Orchard>::new(fvk.clone(), ivk, pivk, vec![])
         });
 
         let events = scan(
@@ -502,6 +559,9 @@ mod tests {
         .await?;
 
         println!("{events:?}");
+
+        let pool = SqlitePool::connect("zec-wallet-test.db").await?;
+        Db::store_events(&pool, &events).await?;
 
         Ok(())
     }
