@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
             .await?;
     }
 
-    monitor_task(config.port, config.poll_interval).await;
+    // monitor_task(config.port, config.poll_interval).await;
     rocket
         .manage(db)
         .mount(

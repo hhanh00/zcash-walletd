@@ -6,6 +6,8 @@ use crate::Hash;
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
+use zcash_keys::address::UnifiedAddress;
+use zcash_keys::encoding::AddressCodec;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey};
 use std::collections::HashMap;
 use zcash_primitives::consensus::{NetworkUpgrade, Parameters};
@@ -40,14 +42,8 @@ impl Db {
             .await?;
         let id_account = id_account.map(|id| id + 1).unwrap_or(0);
         let (diversifier_index, address) = self.next_diversifier(&mut connection).await?;
+        self.store_receivers(&mut connection, name, id_account, 0, diversifier_index, &address).await?;
 
-        sqlx::query("INSERT INTO addresses(label, account, sub_account, address, diversifier_index) VALUES (?1,?2,0,?3,?4)")
-            .bind(name)
-            .bind(id_account)
-            .bind(&address)
-            .bind(diversifier_index as i64)
-            .execute(&mut *connection)
-            .await?;
         let account = Account {
             account_index: id_account,
             address,
@@ -64,22 +60,52 @@ impl Db {
                 .await?;
         let id_sub_account = id_sub_account + 1;
         let (diversifier_index, address) = self.next_diversifier(&mut connection).await?;
-        sqlx::query("INSERT INTO addresses(label, account, sub_account, address, diversifier_index) VALUES (?1,?2,?3,?4,?5)")
-            .bind(name)
-            .bind(id_account)
-            .bind(id_sub_account)
-            .bind(&address)
-            .bind(diversifier_index as i64)
-            .execute(&mut *connection)
-            .await?;
+        self.store_receivers(&mut connection, name, id_account, id_sub_account, diversifier_index, &address).await?;
 
         let sub_account = SubAccount {
             account_index: id_account,
             sub_account_index: id_sub_account,
             address,
         };
-
         Ok(sub_account)
+    }
+
+    async fn store_receivers(&self, connection: &mut SqliteConnection,
+        name: &str, id_account: u32, id_sub_account: u32,
+        diversifier_index: u64,
+        address: &str) -> Result<()> {
+        let r = sqlx::query("INSERT INTO addresses(label, account, sub_account, address, diversifier_index) VALUES (?1,?2,?3,?4,?5)")
+            .bind(name)
+            .bind(id_account)
+            .bind(id_sub_account)
+            .bind(address)
+            .bind(diversifier_index as i64)
+            .execute(&mut *connection)
+            .await?;
+        let id_address = r.last_insert_rowid() as u32;
+
+        let ua = UnifiedAddress::decode(&self.network, address).unwrap();
+        if let Some(address) = ua.sapling() {
+            sqlx::query(
+                "INSERT INTO receivers(pool, id_address, receiver_address)
+                VALUES (1, ?1, ?2)")
+            .bind(id_address)
+            .bind(address.encode(&self.network))
+            .execute(&mut *connection)
+            .await?;
+        }
+        if let Some(address) = ua.orchard() {
+            let ua = UnifiedAddress::from_receivers(Some(*address), None, None).unwrap();
+            sqlx::query(
+                "INSERT INTO receivers(pool, id_address, receiver_address)
+                VALUES (2, ?1, ?2)")
+            .bind(id_address)
+            .bind(ua.encode(&self.network))
+            .execute(&mut *connection)
+            .await?;
+        }
+
+        Ok(())
     }
 
     pub async fn get_accounts(
@@ -149,17 +175,6 @@ impl Db {
             .fetch_optional(&mut *connection)
             .await?;
         Ok(hash)
-    }
-
-    pub async fn mark_spent(&self, id_note: u32, id_tx: u32) -> Result<()> {
-        let mut connection = self.pool.acquire().await?;
-
-        sqlx::query("UPDATE received_notes SET spent = ?1 WHERE id_note = ?2")
-            .bind(id_tx)
-            .bind(id_note)
-            .execute(&mut *connection)
-            .await?;
-        Ok(())
     }
 
     fn row_to_transfer(
@@ -326,6 +341,16 @@ impl Db {
         .await?;
 
         sqlx::query(
+            "CREATE TABLE IF NOT EXISTS receivers (
+            id_receiver INTEGER PRIMARY KEY,
+            pool INTEGER NOT NULL,
+            id_address INTEGER NOT NULL,
+            receiver_address TEXT NOT NULL)",
+        )
+        .execute(&mut *connection)
+        .await?;
+
+        sqlx::query(
             "CREATE TABLE IF NOT EXISTS transactions (
             id_tx INTEGER PRIMARY KEY,
             txid BLOB NOT NULL UNIQUE,
@@ -401,7 +426,9 @@ impl Db {
                         }
                     };
                     let (account, sub_account) = match sqlx::query(
-                        "SELECT account, sub_account FROM addresses WHERE address = ?1",
+                        "SELECT a.account, a.sub_account FROM addresses a
+                        JOIN receivers r ON a.id_address = r.id_address
+                        WHERE r.receiver_address = ?1",
                     )
                     .bind(&received_note.address)
                     .map(|r: SqliteRow| {
@@ -433,7 +460,7 @@ impl Db {
                             .await?
                             .unwrap_or_default();
 
-                            sqlx::query(
+                            let r = sqlx::query(
                                 "INSERT INTO addresses
                             (label, account, sub_account, address, diversifier_index)
                             VALUES ('', ?1, ?2, ?3, ?4)",
@@ -444,6 +471,17 @@ impl Db {
                             .bind(received_note.diversifier_index.unwrap_or_default() as u32)
                             .execute(&mut *db_tx)
                             .await?;
+                            let id_address = r.last_insert_rowid() as u32;
+
+                            sqlx::query(
+                                "INSERT INTO receivers(pool, id_address, receiver_address)
+                                VALUES (?1, ?2, ?3)")
+                            .bind(received_note.pool)
+                            .bind(id_address)
+                            .bind(&received_note.address)
+                            .execute(&mut *db_tx)
+                            .await?;
+
                             (account, sub_account)
                         }
                     };

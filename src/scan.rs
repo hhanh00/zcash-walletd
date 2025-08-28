@@ -242,6 +242,7 @@ pub struct Sapling;
 #[derive(Debug)]
 pub struct ReceivedNote {
     pub txid: Hash,
+    pub pool: u8,
     pub position: u32,
     pub height: u32,
     pub address: String,
@@ -343,6 +344,7 @@ impl Decode<Sapling> for Decoder<Sapling> {
 
             let note = ReceivedNote {
                 txid: txid.try_into().unwrap(),
+                pool: 1,
                 position,
                 height,
                 address,
@@ -425,6 +427,7 @@ impl Decode<Orchard> for Decoder<Orchard> {
 
             let note = ReceivedNote {
                 txid: txid.try_into().unwrap(),
+                pool: 2,
                 position,
                 height,
                 address: ua,
