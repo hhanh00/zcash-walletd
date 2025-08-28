@@ -1,28 +1,32 @@
-use anyhow::Result;
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
+use crate::lwd_rpc::{
+    BlockId, BlockRange, ChainSpec, CompactBlock, CompactSaplingOutput, TxFilter,
+};
 use crate::network::Network;
+use anyhow::Result;
+use rocket::futures::future::BoxFuture;
+use rocket::futures::{future, FutureExt};
 use sapling_crypto::keys::PreparedIncomingViewingKey;
 use sapling_crypto::note::ExtractedNoteCommitment;
-use sapling_crypto::note_encryption::{try_sapling_compact_note_decryption, try_sapling_note_decryption, CompactOutputDescription};
+use sapling_crypto::note_encryption::{
+    try_sapling_compact_note_decryption, try_sapling_note_decryption, CompactOutputDescription,
+};
 use sapling_crypto::{Node, ViewingKey, NOTE_COMMITMENT_TREE_DEPTH};
-use tonic::Request;
-use zcash_primitives::merkle_tree::read_commitment_tree;
-use zcash_primitives::transaction::components::sapling::zip212_enforcement;
-use zcash_primitives::consensus::{BlockHeight, BranchId, NetworkConstants as _};
-use zcash_client_backend::encoding::encode_payment_address;
-use tokio::sync::mpsc::{Sender, channel};
-use zcash_primitives::transaction::{TxId, Transaction};
+use std::collections::HashMap;
+use std::convert::TryFrom;
+use thiserror::Error;
+use tokio::sync::mpsc::{channel, Sender};
+use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use tonic::transport::Channel;
+use tonic::Request;
+use zcash_client_backend::encoding::encode_payment_address;
+use zcash_primitives::consensus::{BlockHeight, BranchId, NetworkConstants as _};
 use zcash_primitives::memo::{Memo, MemoBytes};
-use std::convert::TryFrom;
-use std::collections::HashMap;
-use rocket::futures::{FutureExt, future};
-use rocket::futures::future::BoxFuture;
-use crate::lwd_rpc::{ChainSpec, BlockId, BlockRange, CompactBlock, CompactOutput, TxFilter};
-use tokio::time::Duration;
-use thiserror::Error;
+use zcash_primitives::merkle_tree::read_commitment_tree;
+use zcash_primitives::transaction::components::sapling::zip212_enforcement;
+use zcash_primitives::transaction::{Transaction, TxId};
 
 #[derive(Error, Debug)]
 pub enum ScanError {
@@ -50,13 +54,24 @@ pub struct Block {
 }
 
 pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) -> Result<u32> {
-    let latest_block_id = client.get_latest_block(Request::new(ChainSpec {})).await?.into_inner();
+    let latest_block_id = client
+        .get_latest_block(Request::new(ChainSpec {}))
+        .await?
+        .into_inner();
     let latest_height = latest_block_id.height;
     Ok(latest_height as u32)
 }
 
-pub async fn scan_blocks(network: Network, start_height: u32, lwd_url: &str, fvk: &PreparedIncomingViewingKey, mut prev_block_hash: Option<[u8; 32]>)
-    -> Result<(impl Stream<Item=ScannerOutput>, BoxFuture<'static, Result<()>>)> {
+pub async fn scan_blocks(
+    network: Network,
+    start_height: u32,
+    lwd_url: &str,
+    fvk: &PreparedIncomingViewingKey,
+    mut prev_block_hash: Option<[u8; 32]>,
+) -> Result<(
+    impl Stream<Item = ScannerOutput>,
+    BoxFuture<'static, Result<()>>,
+)> {
     let mut client = CompactTxStreamerClient::connect(lwd_url.to_string()).await?;
     let latest_height = get_latest_height(&mut client).await?;
     let start_block_id = BlockId {
@@ -65,11 +80,15 @@ pub async fn scan_blocks(network: Network, start_height: u32, lwd_url: &str, fvk
     };
     let (scan_sender, scan_receiver) = channel::<ScannerOutput>(1);
     if start_height <= latest_height {
-        let tree_state = client.get_tree_state(Request::new(start_block_id)).await?.into_inner();
-        let commitment_tree = hex::decode(tree_state.tree)?;
-        let commitment_tree = read_commitment_tree::<Node, _, NOTE_COMMITMENT_TREE_DEPTH>(&*commitment_tree)?;
+        let tree_state = client
+            .get_tree_state(Request::new(start_block_id))
+            .await?
+            .into_inner();
+        let commitment_tree = hex::decode(tree_state.sapling_tree)?;
+        let commitment_tree =
+            read_commitment_tree::<Node, _, NOTE_COMMITMENT_TREE_DEPTH>(&*commitment_tree)?;
         let mut current_position = commitment_tree.size();
-        log::info!("Scanning from {} to {}", start_height, latest_height);
+        log::info!("Scanning from {start_height} to {latest_height}");
         let mut block_stream = client
             .get_block_range(Request::new(BlockRange {
                 start: Some(BlockId {
@@ -80,6 +99,7 @@ pub async fn scan_blocks(network: Network, start_height: u32, lwd_url: &str, fvk
                     height: latest_height as u64,
                     hash: vec![],
                 }),
+                spam_filter_threshold: 0,
             }))
             .await?
             .into_inner();
@@ -94,7 +114,8 @@ pub async fn scan_blocks(network: Network, start_height: u32, lwd_url: &str, fvk
                         return Err(ScanError::Reorganization.into());
                     }
                 }
-                let count_notes = scan_one_block(&network, &block, &fvk2, current_position, &scan_sender).await?;
+                let count_notes =
+                    scan_one_block(&network, &block, &fvk2, current_position, &scan_sender).await?;
                 current_position += count_notes;
                 let mut b = Block {
                     height: block.height as u32,
@@ -108,8 +129,7 @@ pub async fn scan_blocks(network: Network, start_height: u32, lwd_url: &str, fvk
         });
 
         Ok((ReceiverStream::new(scan_receiver), Box::pin(jh.map(|e| e?))))
-    }
-    else {
+    } else {
         Ok((ReceiverStream::new(scan_receiver), Box::pin(future::ok(()))))
     }
 }
@@ -125,7 +145,13 @@ pub struct DecryptedNote {
     pub memo: String,
 }
 
-async fn scan_one_block(network: &Network, block: &CompactBlock, pivk: &PreparedIncomingViewingKey, start_position: usize, tx: &Sender<ScannerOutput>) -> Result<usize> {
+async fn scan_one_block(
+    network: &Network,
+    block: &CompactBlock,
+    pivk: &PreparedIncomingViewingKey,
+    start_position: usize,
+    tx: &Sender<ScannerOutput>,
+) -> Result<usize> {
     let height = BlockHeight::from_u32(block.height as u32);
     let mut count_notes = 0;
     let zip32_enforcement = zip212_enforcement(network, height);
@@ -149,7 +175,7 @@ async fn scan_one_block(network: &Network, block: &CompactBlock, pivk: &Prepared
     Ok(count_notes)
 }
 
-pub fn to_output_description(co: &CompactOutput) -> CompactOutputDescription {
+pub fn to_output_description(co: &CompactSaplingOutput) -> CompactOutputDescription {
     let mut cmu = [0u8; 32];
     cmu.copy_from_slice(&co.cmu);
     let mut epk = [0u8; 32];
@@ -165,14 +191,25 @@ pub fn to_output_description(co: &CompactOutput) -> CompactOutputDescription {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn scan_transaction(network: &Network, client: &mut CompactTxStreamerClient<Channel>, height: u32, tx_id: TxId,
-                              tx_position: usize, vk: &ViewingKey, pivk: &PreparedIncomingViewingKey, nf_map: &HashMap<[u8; 32], u32>) -> Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
-    log::info!("Scan tx id: {}", tx_id);
-    let raw_tx = client.get_transaction(Request::new(TxFilter {
-        block: None,
-        index: 0,
-        hash: tx_id.as_ref().to_vec(),
-    })).await?.into_inner();
+pub async fn scan_transaction(
+    network: &Network,
+    client: &mut CompactTxStreamerClient<Channel>,
+    height: u32,
+    tx_id: TxId,
+    tx_position: usize,
+    vk: &ViewingKey,
+    pivk: &PreparedIncomingViewingKey,
+    nf_map: &HashMap<[u8; 32], u32>,
+) -> Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
+    log::info!("Scan tx id: {tx_id}");
+    let raw_tx = client
+        .get_transaction(Request::new(TxFilter {
+            block: None,
+            index: 0,
+            hash: tx_id.as_ref().to_vec(),
+        }))
+        .await?
+        .into_inner();
     let branch_id = BranchId::for_height(network, BlockHeight::from_u32(height));
     let tx = Transaction::read(&*raw_tx.data, branch_id)?;
     let txid = tx.txid();
@@ -190,7 +227,8 @@ pub async fn scan_transaction(network: &Network, client: &mut CompactTxStreamerC
         }
 
         for (index, od) in sapling_bundle.shielded_outputs().iter().enumerate() {
-            if let Some((note, pa, memo)) = try_sapling_note_decryption(pivk, od, zip32_enforcement) {
+            if let Some((note, pa, memo)) = try_sapling_note_decryption(pivk, od, zip32_enforcement)
+            {
                 let memo_bytes = MemoBytes::from_bytes(&memo).unwrap();
                 let memo: Memo = Memo::try_from(memo_bytes)?;
                 let memo = match memo {
@@ -216,7 +254,7 @@ pub async fn scan_transaction(network: &Network, client: &mut CompactTxStreamerC
         }
     }
 
-    log::info!("TXID: {}", txid);
+    log::info!("TXID: {txid}");
     let value = i64::from(tx.sapling_value_balance());
     Ok((spends, outputs, value))
 }
@@ -231,9 +269,10 @@ pub async fn monitor_task(birth_height: Option<u32>, port: u16, poll_interval: u
         loop {
             let client = reqwest::Client::new();
             client
-                .post(format!("http://localhost:{port}/request_scan", ))
+                .post(format!("http://localhost:{port}/request_scan",))
                 .json(&params)
-                .send().await?;
+                .send()
+                .await?;
             params.clear();
 
             tokio::time::sleep(Duration::from_secs(poll_interval as u64)).await;
@@ -241,3 +280,24 @@ pub async fn monitor_task(birth_height: Option<u32>, port: u16, poll_interval: u
         Ok::<_, anyhow::Error>(())
     });
 }
+
+/*
+TODO
+Make reading commitment tree abstract -> size
+    We need the tree size and maintain a count of notes but we don't need the note commitment
+- note should have psi for orchard
+
+scan_block
+    - remove spawn
+    - derive pivk sap/orch
+    - scan_one<Pool>
+
+trait Pool
+    - pivk from ufvk
+    - try_note_decrypt
+    - cmx, epk, nf, extraction
+    - nf derivation
+    - note_count
+- database upgrade
+
+*/
