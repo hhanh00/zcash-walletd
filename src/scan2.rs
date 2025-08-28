@@ -1,34 +1,46 @@
 use anyhow::Result;
 use orchard::{
-    note::{ExtractedNoteCommitment, Nullifier},
-    note_encryption::{CompactAction, OrchardDomain},
+    keys::FullViewingKey, note::{ExtractedNoteCommitment, Nullifier}, note_encryption::{CompactAction, OrchardDomain}, primitives::redpallas::{Signature, SpendAuth}, Action
 };
-use sapling_crypto::note_encryption::{SaplingDomain, Zip212Enforcement};
-use tonic::Request;
-use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_note_encryption::{try_compact_note_decryption, EphemeralKeyBytes, ShieldedOutput};
-use zcash_primitives::merkle_tree::{read_commitment_tree, HashSer};
+use sapling_crypto::{
+    bundle::OutputDescription,
+    note_encryption::{SaplingDomain, Zip212Enforcement},
+    NullifierDerivingKey,
+};
+use tonic::{transport::Channel, Request};
+use zcash_address::unified::{self, Encoding};
+use zcash_keys::encoding::AddressCodec;
+use zcash_note_encryption::{
+    try_compact_note_decryption, try_note_decryption, EphemeralKeyBytes, ShieldedOutput,
+};
+use zcash_primitives::{
+    merkle_tree::{read_commitment_tree, HashSer},
+    transaction::Transaction,
+};
+use zcash_protocol::{
+    consensus::{BlockHeight, BranchId, Parameters},
+    memo::{Memo, MemoBytes},
+};
 
 use crate::{
     lwd_rpc::{
         compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange,
-        CompactOrchardAction, CompactSaplingOutput,
+        CompactOrchardAction, CompactSaplingOutput, TxFilter,
     },
     network::Network,
 };
 
 pub type Hash = [u8; 32];
+pub type Client = CompactTxStreamerClient<Channel>;
 
 pub async fn scan(
-    _network: &Network,
-    lwd_url: &str,
+    client: &mut Client,
     start: u32,
     end: u32,
     prev_hash: &Hash,
-    ufvk: &UnifiedFullViewingKey,
+    sap_dec: &Option<Decoder<Sapling>>,
+    orc_dec: &Option<Decoder<Orchard>>,
 ) -> Result<Vec<WalletTx>> {
-    let mut client = CompactTxStreamerClient::connect(lwd_url.to_string()).await?;
-
     let tree_state = client
         .get_tree_state(Request::new(BlockId {
             height: start as u64,
@@ -36,16 +48,6 @@ pub async fn scan(
         }))
         .await?
         .into_inner();
-    let sap_dec = ufvk.sapling().map(|fvk| {
-        let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
-        let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
-        Decoder::<Sapling>::new(pivk)
-    });
-    let orc_dec = ufvk.orchard().map(|fvk| {
-        let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
-        let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
-        Decoder::<Orchard>::new(pivk)
-    });
 
     let mut blocks = client
         .get_block_range(Request::new(BlockRange {
@@ -76,7 +78,7 @@ pub async fn scan(
 
         for vtx in block.vtx.iter() {
             let mut found = false;
-            if let Some(sap_dec) = &sap_dec {
+            if let Some(sap_dec) = sap_dec {
                 for o in vtx.outputs.iter() {
                     if sap_dec.try_compact_note_decryption(o) {
                         found = true;
@@ -84,7 +86,7 @@ pub async fn scan(
                 }
             }
 
-            if let Some(orc_dec) = &orc_dec {
+            if let Some(orc_dec) = orc_dec {
                 for o in vtx.actions.iter() {
                     if orc_dec.try_compact_note_decryption(o) {
                         found = true;
@@ -94,6 +96,7 @@ pub async fn scan(
 
             if found {
                 let tx = WalletTx {
+                    height: block.height as u32,
                     txid: vtx.hash.clone().try_into().unwrap(),
                     sap_position,
                     orc_position,
@@ -110,9 +113,66 @@ pub async fn scan(
     Ok(txs)
 }
 
+pub async fn scan_txs(
+    network: &Network,
+    client: &mut Client,
+    txs: &[WalletTx],
+    sap_dec: &Option<Decoder<Sapling>>,
+    orc_dec: &Option<Decoder<Orchard>>,
+) -> Result<Vec<ReceivedNote>> {
+    let mut notes = vec![];
+    for wtx in txs {
+        let txid = &wtx.txid;
+        let raw_tx = client
+            .get_transaction(Request::new(TxFilter {
+                hash: txid.to_vec(),
+                ..TxFilter::default()
+            }))
+            .await?
+            .into_inner();
+        let branch_id = BranchId::for_height(network, BlockHeight::from_u32(wtx.height));
+        let tx = Transaction::read(&*raw_tx.data, branch_id)?;
+        let tx = tx.into_data();
+
+        if let Some(sap_dec) = sap_dec {
+            if let Some(sapling_bundle) = tx.sapling_bundle() {
+                for (vout, o) in sapling_bundle.shielded_outputs().iter().enumerate() {
+                    if let Some(note) = sap_dec.try_note_decryption(
+                        network,
+                        wtx.height,
+                        txid,
+                        vout as u32 + wtx.sap_position,
+                        o,
+                    )? {
+                        notes.push(note);
+                    }
+                }
+            }
+        }
+        if let Some(orc_dec) = orc_dec {
+            if let Some(orchard_bundle) = tx.orchard_bundle() {
+                for (vout, a) in orchard_bundle.actions().iter().enumerate() {
+                    if let Some(note) = orc_dec.try_note_decryption(
+                        network,
+                        wtx.height,
+                        txid,
+                        vout as u32 + wtx.orc_position,
+                        a,
+                    )? {
+                        notes.push(note);
+                    }
+                }
+            }
+        }
+    }
+    Ok(notes)
+}
+
 pub fn get_tree_size(tree: &str) -> Result<u32> {
     let tree = hex::decode(tree)?;
-    if tree.is_empty() { return Ok(0); }
+    if tree.is_empty() {
+        return Ok(0);
+    }
     let tree = read_commitment_tree::<DummyNode, _, 32>(&*tree)?;
 
     Ok(tree.size() as u32)
@@ -120,27 +180,64 @@ pub fn get_tree_size(tree: &str) -> Result<u32> {
 
 pub trait Pool {
     type PreparedIncomingViewingKey;
+    type NullifierKey;
+    type CompactOutput;
     type Output;
 }
 
 pub struct Sapling;
 
+#[derive(Debug)]
+pub struct ReceivedNote {
+    pub txid: Hash,
+    pub position: u32,
+    pub height: u32,
+    pub address: String,
+    pub diversifier: [u8; 11],
+    pub value: u64,
+    pub rcm: Hash,
+    pub nf: Hash,
+    pub rho: Option<Hash>,
+    pub memo: String,
+}
+
+pub struct SpentNote {
+    pub position: u32,
+    pub address: String,
+}
+
+pub enum NoteUpdate {
+    Received(ReceivedNote),
+    Spent(SpentNote),
+}
+
 impl Pool for Sapling {
     type PreparedIncomingViewingKey = sapling_crypto::keys::PreparedIncomingViewingKey;
-    type Output = CompactSaplingOutput;
+    type NullifierKey = NullifierDerivingKey;
+    type CompactOutput = CompactSaplingOutput;
+    type Output = OutputDescription<[u8; 192]>;
 }
 
 pub trait Decode<P: Pool> {
-    fn try_compact_note_decryption(&self, output: &P::Output) -> bool;
+    fn try_compact_note_decryption(&self, output: &P::CompactOutput) -> bool;
+    fn try_note_decryption(
+        &self,
+        network: &Network,
+        height: u32,
+        txid: &Hash,
+        position: u32,
+        output: &P::Output,
+    ) -> Result<Option<ReceivedNote>>;
 }
 
 pub struct Decoder<P: Pool> {
+    pub nk: P::NullifierKey,
     pub pivk: P::PreparedIncomingViewingKey,
 }
 
 impl<P: Pool> Decoder<P> {
-    pub fn new(pivk: P::PreparedIncomingViewingKey) -> Self {
-        Self { pivk }
+    pub fn new(nk: P::NullifierKey, pivk: P::PreparedIncomingViewingKey) -> Self {
+        Self { nk, pivk }
     }
 }
 
@@ -149,13 +246,47 @@ impl Decode<Sapling> for Decoder<Sapling> {
         let domain = SaplingDomain::new(Zip212Enforcement::On);
         try_compact_note_decryption(&domain, &self.pivk, output).is_some()
     }
+
+    fn try_note_decryption(
+        &self,
+        network: &Network,
+        height: u32,
+        txid: &Hash,
+        position: u32,
+        output: &OutputDescription<[u8; 192]>,
+    ) -> Result<Option<ReceivedNote>> {
+        let domain = SaplingDomain::new(Zip212Enforcement::On);
+        if let Some((note, pa, memo_bytes)) = try_note_decryption(&domain, &self.pivk, output) {
+            let address = pa.encode(network);
+            let diversifier = pa.diversifier().0;
+            let value = note.value().inner();
+            let rcm = note.rcm().to_bytes();
+            let nf = note.nf(&self.nk, position as u64);
+            let note = ReceivedNote {
+                txid: *txid,
+                position,
+                height,
+                address,
+                diversifier,
+                value,
+                rcm,
+                nf: nf.to_vec().try_into().unwrap(),
+                rho: None,
+                memo: memo_text(&memo_bytes)?,
+            };
+            return Ok(Some(note));
+        }
+        Ok(None)
+    }
 }
 
 pub struct Orchard;
 
 impl Pool for Orchard {
+    type NullifierKey = FullViewingKey;
     type PreparedIncomingViewingKey = orchard::keys::PreparedIncomingViewingKey;
-    type Output = CompactOrchardAction;
+    type CompactOutput = CompactOrchardAction;
+    type Output = Action<Signature<SpendAuth>>;
 }
 
 impl Decode<Orchard> for Decoder<Orchard> {
@@ -169,6 +300,43 @@ impl Decode<Orchard> for Decoder<Orchard> {
         );
         let domain = OrchardDomain::for_compact_action(&ca);
         try_compact_note_decryption(&domain, &self.pivk, &ca).is_some()
+    }
+
+    fn try_note_decryption(
+        &self,
+        network: &Network,
+        height: u32,
+        txid: &Hash,
+        position: u32,
+        action: &Action<Signature<SpendAuth>>,
+    ) -> Result<Option<ReceivedNote>> {
+        let domain = OrchardDomain::for_action(action);
+        if let Some((note, address, memo_bytes)) = try_note_decryption(&domain, &self.pivk, action)
+        {
+            let ua = unified::Receiver::Orchard(address.to_raw_address_bytes());
+            let ua = unified::Address::try_from_items(vec![ua])?;
+            let ua = ua.encode(&network.network_type());
+            let diversifier = *address.diversifier().as_array();
+            let value = note.value().inner();
+            let rcm = *note.rseed().as_bytes();
+            let nf = note.nullifier(&self.nk);
+            let rho = note.rho().to_bytes();
+            let note = ReceivedNote {
+                txid: *txid,
+                position,
+                height,
+                address: ua,
+                diversifier,
+                value,
+                rcm,
+                nf: nf.to_bytes(),
+                rho: Some(rho),
+                memo: memo_text(&memo_bytes)?,
+            };
+            return Ok(Some(note));
+        }
+
+        Ok(None)
     }
 }
 
@@ -213,9 +381,21 @@ impl ShieldedOutput<SaplingDomain, 52> for CompactSaplingOutput {
 
 #[derive(Debug)]
 pub struct WalletTx {
+    pub height: u32,
     pub txid: Hash,
     pub sap_position: u32,
     pub orc_position: u32,
+}
+
+pub fn memo_text(memo_bytes: &[u8]) -> Result<String> {
+    let memo_bytes = MemoBytes::from_bytes(memo_bytes)?;
+    let memo = Memo::try_from(memo_bytes)?;
+    let memo = if let Memo::Text(memo) = memo {
+        memo.to_string()
+    } else {
+        String::new()
+    };
+    Ok(memo)
 }
 
 #[cfg(test)]
@@ -227,18 +407,37 @@ mod tests {
 
     #[tokio::test]
     async fn test() -> Result<()> {
+        let mut client = CompactTxStreamerClient::connect("https://zec.rocks".to_string()).await?;
+
         let prev_hash =
             hex::decode("5f03d35ae940bb840564c3b7af7ab72255096d3eca15c910c0e40d0000000000")
                 .unwrap();
-        scan(
-            &Network::Main,
-            "https://zec.rocks",
+        let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&Network::Main, FVK).unwrap();
+        let sap_dec = ufvk.sapling().map(|fvk| {
+            let nk = fvk.fvk().vk.nk;
+            let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
+            let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
+            Decoder::<Sapling>::new(nk, pivk)
+        });
+        let orc_dec = ufvk.orchard().map(|fvk| {
+            let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
+            let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
+            Decoder::<Orchard>::new(fvk.clone(), pivk)
+        });
+
+        let txs = scan(
+            &mut client,
             2_890_000,
             2_900_000,
             &prev_hash.try_into().unwrap(),
-            &UnifiedFullViewingKey::decode(&Network::Main, FVK).unwrap(),
+            &sap_dec,
+            &orc_dec,
         )
         .await?;
+
+        let notes = scan_txs(&Network::Main, &mut client, &txs, &sap_dec, &orc_dec).await?;
+
+        println!("{notes:?}");
 
         Ok(())
     }
