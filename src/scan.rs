@@ -1,57 +1,42 @@
-use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
-use crate::lwd_rpc::{
-    BlockId, BlockRange, ChainSpec, CompactBlock, CompactSaplingOutput, TxFilter,
-};
-use crate::network::Network;
-use anyhow::Result;
-use rocket::futures::future::BoxFuture;
-use rocket::futures::{future, FutureExt};
-use sapling_crypto::keys::PreparedIncomingViewingKey;
-use sapling_crypto::note::ExtractedNoteCommitment;
-use sapling_crypto::note_encryption::{
-    try_sapling_compact_note_decryption, try_sapling_note_decryption, CompactOutputDescription,
-};
-use sapling_crypto::{Node, ViewingKey, NOTE_COMMITMENT_TREE_DEPTH};
 use std::collections::HashMap;
-use std::convert::TryFrom;
+
+use anyhow::Result;
+use orchard::{
+    keys::FullViewingKey,
+    note::{ExtractedNoteCommitment, Nullifier},
+    note_encryption::{CompactAction, OrchardDomain},
+    primitives::redpallas::{Signature, SpendAuth},
+    Action, Address,
+};
+use sapling_crypto::{
+    bundle::OutputDescription,
+    note_encryption::{SaplingDomain, Zip212Enforcement},
+    zip32::DiversifiableFullViewingKey,
+    NullifierDerivingKey, PaymentAddress,
+};
 use thiserror::Error;
-use tokio::sync::mpsc::{channel, Sender};
-use tokio::time::Duration;
-use tokio_stream::wrappers::ReceiverStream;
-use tokio_stream::Stream;
-use tonic::transport::Channel;
-use tonic::Request;
-use zcash_client_backend::encoding::encode_payment_address;
-use zcash_primitives::consensus::{BlockHeight, BranchId, NetworkConstants as _};
-use zcash_primitives::memo::{Memo, MemoBytes};
-use zcash_primitives::merkle_tree::read_commitment_tree;
-use zcash_primitives::transaction::components::sapling::zip212_enforcement;
-use zcash_primitives::transaction::{Transaction, TxId};
+use tonic::{transport::Channel, Request};
+use zcash_address::unified::{self, Encoding};
+use zcash_keys::encoding::AddressCodec;
+use zcash_note_encryption::{
+    try_compact_note_decryption, try_note_decryption, EphemeralKeyBytes, ShieldedOutput,
+};
+use zcash_primitives::{
+    merkle_tree::{read_commitment_tree, HashSer},
+    transaction::Transaction,
+};
+use zcash_protocol::{
+    consensus::{BlockHeight, BranchId, Parameters},
+    memo::{Memo, MemoBytes},
+};
 
-#[derive(Error, Debug)]
-pub enum ScanError {
-    #[error("Blockchain Reorganization")]
-    Reorganization,
-}
-
-#[derive(Debug)]
-pub enum ScannerOutput {
-    TxIndex(TxIndex),
-    Block(Block),
-}
-
-#[derive(Debug)]
-pub struct TxIndex {
-    pub height: u32,
-    pub tx_id: TxId,
-    pub position: usize,
-}
-
-#[derive(Debug)]
-pub struct Block {
-    pub height: u32,
-    pub hash: [u8; 32],
-}
+use crate::{
+    lwd_rpc::{
+        compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
+        CompactOrchardAction, CompactSaplingOutput, TxFilter,
+    },
+    network::Network, Client, Hash,
+};
 
 pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) -> Result<u32> {
     let latest_block_id = client
@@ -62,242 +47,538 @@ pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) ->
     Ok(latest_height as u32)
 }
 
-pub async fn scan_blocks(
-    network: Network,
-    start_height: u32,
-    lwd_url: &str,
-    fvk: &PreparedIncomingViewingKey,
-    mut prev_block_hash: Option<[u8; 32]>,
-) -> Result<(
-    impl Stream<Item = ScannerOutput>,
-    BoxFuture<'static, Result<()>>,
-)> {
-    let mut client = CompactTxStreamerClient::connect(lwd_url.to_string()).await?;
-    let latest_height = get_latest_height(&mut client).await?;
-    let start_block_id = BlockId {
-        height: start_height as u64,
-        hash: vec![],
-    };
-    let (scan_sender, scan_receiver) = channel::<ScannerOutput>(1);
-    if start_height <= latest_height {
-        let tree_state = client
-            .get_tree_state(Request::new(start_block_id))
-            .await?
-            .into_inner();
-        let commitment_tree = hex::decode(tree_state.sapling_tree)?;
-        let commitment_tree =
-            read_commitment_tree::<Node, _, NOTE_COMMITMENT_TREE_DEPTH>(&*commitment_tree)?;
-        let mut current_position = commitment_tree.size();
-        log::info!("Scanning from {start_height} to {latest_height}");
-        let mut block_stream = client
-            .get_block_range(Request::new(BlockRange {
-                start: Some(BlockId {
-                    height: start_height as u64,
-                    hash: vec![],
-                }),
-                end: Some(BlockId {
-                    height: latest_height as u64,
-                    hash: vec![],
-                }),
-                spam_filter_threshold: 0,
-            }))
-            .await?
-            .into_inner();
+pub async fn scan(
+    network: &Network,
+    client: &mut Client,
+    start: u32,
+    end: u32,
+    prev_hash: &Hash,
+    sap_dec: &mut Option<Decoder<Sapling>>,
+    orc_dec: &mut Option<Decoder<Orchard>>,
+) -> Result<Vec<ScanEvent>, ScanError> {
+    let tree_state = client
+        .get_tree_state(Request::new(BlockId {
+            height: start as u64,
+            hash: vec![],
+        }))
+        .await
+        .map_err(|e| ScanError::Other(anyhow::Error::new(e)))?
+        .into_inner();
 
-        let fvk2 = fvk.clone();
-        let jh = tokio::spawn(async move {
-            while let Some(block) = block_stream.message().await? {
-                let prev_block_hash = prev_block_hash.take();
-                if let Some(prev_block_hash) = prev_block_hash {
-                    if prev_block_hash.to_vec() != block.prev_hash {
-                        log::info!("Chaintip mismatch");
-                        return Err(ScanError::Reorganization.into());
+    let mut blocks = client
+        .get_block_range(Request::new(BlockRange {
+            start: Some(BlockId {
+                height: start as u64,
+                hash: vec![],
+            }),
+            end: Some(BlockId {
+                height: end as u64,
+                hash: vec![],
+            }),
+            spam_filter_threshold: 0,
+        }))
+        .await
+        .map_err(|e| ScanError::Other(anyhow::Error::new(e)))?
+        .into_inner();
+    let mut prev_hash = *prev_hash;
+    let mut sap_position = get_tree_size(&tree_state.sapling_tree).unwrap();
+    let mut orc_position = get_tree_size(&tree_state.orchard_tree).unwrap();
+
+    let mut events = vec![];
+    let mut new_txids = vec![];
+    while let Ok(Some(block)) = blocks.message().await {
+        let height = block.height as u32;
+        let block_prev_hash: Hash = block.prev_hash.try_into().unwrap();
+        if prev_hash != block_prev_hash {
+            println!("{} {}", block.height, hex::encode(block_prev_hash));
+            return Err(ScanError::Reorganization);
+        }
+        prev_hash = block.hash.try_into().unwrap();
+
+        for vtx in block.vtx.iter() {
+            let mut found = false;
+            if let Some(sap_dec) = sap_dec {
+                for i in vtx.spends.iter() {
+                    let nf: &Hash = i.nf.as_slice().try_into().unwrap();
+                    if let Some(value) = sap_dec.nfs.get(nf) {
+                        events.push(ScanEvent::Spent(SpentNote {
+                            nf: *nf,
+                            txid: vtx.hash.clone().try_into().unwrap(),
+                            value: *value,
+                        }));
                     }
                 }
-                let count_notes =
-                    scan_one_block(&network, &block, &fvk2, current_position, &scan_sender).await?;
-                current_position += count_notes;
-                let mut b = Block {
-                    height: block.height as u32,
-                    hash: [0u8; 32],
-                };
-                b.hash.copy_from_slice(&block.hash);
-                scan_sender.send(ScannerOutput::Block(b)).await?;
+
+                for (vout, o) in vtx.outputs.iter().enumerate() {
+                    if let Some(n) = sap_dec.try_compact_note_decryption(
+                        network,
+                        height,
+                        &vtx.hash,
+                        sap_position + vout as u32,
+                        o,
+                    )? {
+                        sap_dec.add_nf(n.nf, n.value);
+                        events.push(ScanEvent::Received(n));
+                        found = true;
+                    }
+                }
             }
-            log::info!("SCAN FINISHED");
-            Ok::<_, anyhow::Error>(())
-        });
 
-        Ok((ReceiverStream::new(scan_receiver), Box::pin(jh.map(|e| e?))))
-    } else {
-        Ok((ReceiverStream::new(scan_receiver), Box::pin(future::ok(()))))
-    }
-}
-
-pub struct DecryptedNote {
-    pub address: String,
-    pub height: u32,
-    pub position: usize,
-    pub diversifier: [u8; 11],
-    pub value: u64,
-    pub rcm: [u8; 32],
-    pub nf: [u8; 32],
-    pub memo: String,
-}
-
-async fn scan_one_block(
-    network: &Network,
-    block: &CompactBlock,
-    pivk: &PreparedIncomingViewingKey,
-    start_position: usize,
-    tx: &Sender<ScannerOutput>,
-) -> Result<usize> {
-    let height = BlockHeight::from_u32(block.height as u32);
-    let mut count_notes = 0;
-    let zip32_enforcement = zip212_enforcement(network, height);
-    for transaction in block.vtx.iter() {
-        for cout in transaction.outputs.iter() {
-            let co = to_output_description(cout);
-            if try_sapling_compact_note_decryption(pivk, &co, zip32_enforcement).is_some() {
-                let mut tx_id = [0u8; 32];
-                tx_id.copy_from_slice(&transaction.hash);
-                let tx_index = TxIndex {
-                    height: block.height as u32,
-                    tx_id: TxId::from_bytes(tx_id),
-                    position: start_position + count_notes,
-                };
-                tx.send(ScannerOutput::TxIndex(tx_index)).await?;
-                break;
+            if let Some(orc_dec) = orc_dec {
+                for (vout, a) in vtx.actions.iter().enumerate() {
+                    let nf: &Hash = a.nullifier.as_slice().try_into().unwrap();
+                    if let Some(value) = orc_dec.nfs.get(nf) {
+                        events.push(ScanEvent::Spent(SpentNote {
+                            nf: *nf,
+                            txid: vtx.hash.clone().try_into().unwrap(),
+                            value: *value,
+                        }));
+                    }
+                    if let Some(n) = orc_dec.try_compact_note_decryption(
+                        network,
+                        height,
+                        &vtx.hash,
+                        orc_position + vout as u32,
+                        a,
+                    )? {
+                        orc_dec.add_nf(n.nf, n.value);
+                        events.push(ScanEvent::Received(n));
+                        found = true;
+                    }
+                }
             }
+
+            if found {
+                let txid: Hash = vtx.hash.clone().try_into().unwrap();
+                new_txids.push(WalletTx {
+                    height,
+                    txid,
+                    sap_position,
+                    orc_position,
+                });
+            }
+
+            sap_position += vtx.outputs.len() as u32;
+            orc_position += vtx.actions.len() as u32;
         }
-        count_notes += transaction.outputs.len();
     }
-    Ok(count_notes)
+
+    for wtx in new_txids.iter() {
+        let memos = scan_tx(network, client, wtx, sap_dec, orc_dec).await?;
+        for m in memos {
+            events.push(ScanEvent::Memo(m));
+        }
+    }
+    events.push(ScanEvent::Block(end, prev_hash));
+
+    Ok(events)
 }
 
-pub fn to_output_description(co: &CompactSaplingOutput) -> CompactOutputDescription {
-    let mut cmu = [0u8; 32];
-    cmu.copy_from_slice(&co.cmu);
-    let mut epk = [0u8; 32];
-    epk.copy_from_slice(&co.epk);
-    let mut enc_ciphertext = [0u8; 52];
-    enc_ciphertext.copy_from_slice(&co.ciphertext);
-
-    CompactOutputDescription {
-        ephemeral_key: epk.into(),
-        cmu: ExtractedNoteCommitment::from_bytes(&cmu).unwrap(),
-        enc_ciphertext,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn scan_transaction(
+pub async fn scan_tx(
     network: &Network,
-    client: &mut CompactTxStreamerClient<Channel>,
-    height: u32,
-    tx_id: TxId,
-    tx_position: usize,
-    vk: &ViewingKey,
-    pivk: &PreparedIncomingViewingKey,
-    nf_map: &HashMap<[u8; 32], u32>,
-) -> Result<(Vec<u32>, Vec<DecryptedNote>, i64)> {
-    log::info!("Scan tx id: {tx_id}");
+    client: &mut Client,
+    wtx: &WalletTx,
+    sap_dec: &Option<Decoder<Sapling>>,
+    orc_dec: &Option<Decoder<Orchard>>,
+) -> Result<Vec<MemoNote>> {
+    let mut notes = vec![];
     let raw_tx = client
         .get_transaction(Request::new(TxFilter {
-            block: None,
-            index: 0,
-            hash: tx_id.as_ref().to_vec(),
+            hash: wtx.txid.to_vec(),
+            ..TxFilter::default()
         }))
         .await?
         .into_inner();
-    let branch_id = BranchId::for_height(network, BlockHeight::from_u32(height));
+    let branch_id = BranchId::for_height(network, BlockHeight::from_u32(wtx.height));
     let tx = Transaction::read(&*raw_tx.data, branch_id)?;
-    let txid = tx.txid();
     let tx = tx.into_data();
 
-    let zip32_enforcement = zip212_enforcement(network, BlockHeight::from_u32(height));
-    let mut spends: Vec<u32> = vec![];
-    let mut outputs: Vec<DecryptedNote> = vec![];
-
-    if let Some(sapling_bundle) = tx.sapling_bundle() {
-        for sd in sapling_bundle.shielded_spends() {
-            if let Some(id_note) = nf_map.get(sd.nullifier().as_ref()) {
-                spends.push(*id_note);
-            }
-        }
-
-        for (index, od) in sapling_bundle.shielded_outputs().iter().enumerate() {
-            if let Some((note, pa, memo)) = try_sapling_note_decryption(pivk, od, zip32_enforcement)
-            {
-                let memo_bytes = MemoBytes::from_bytes(&memo).unwrap();
-                let memo: Memo = Memo::try_from(memo_bytes)?;
-                let memo = match memo {
-                    Memo::Text(text) => text.to_string(),
-                    _ => "".to_string(),
-                };
-                let diversifier: [u8; 11] = pa.diversifier().0;
-                let rcm = note.rcm().to_bytes();
-                let position = tx_position + index;
-                let nf = note.nf(&vk.nk, position as u64);
-                let note = DecryptedNote {
-                    address: encode_payment_address(network.hrp_sapling_payment_address(), &pa),
-                    height,
-                    position,
-                    diversifier,
-                    value: note.value().inner(),
-                    rcm,
-                    nf: nf.0,
-                    memo,
-                };
-                outputs.push(note);
+    if let Some(sap_dec) = sap_dec {
+        if let Some(sapling_bundle) = tx.sapling_bundle() {
+            for (vout, o) in sapling_bundle.shielded_outputs().iter().enumerate() {
+                if let Some(note) =
+                    sap_dec.try_note_decryption(vout as u32 + wtx.sap_position, o)?
+                {
+                    notes.push(note);
+                }
             }
         }
     }
-
-    log::info!("TXID: {txid}");
-    let value = i64::from(tx.sapling_value_balance());
-    Ok((spends, outputs, value))
-}
-
-#[allow(unreachable_code)]
-pub async fn monitor_task(birth_height: Option<u32>, port: u16, poll_interval: u16) {
-    let mut params = HashMap::<&str, u32>::new();
-    if let Some(birth_height) = birth_height {
-        params.insert("start_height", birth_height);
-    }
-    tokio::spawn(async move {
-        loop {
-            let client = reqwest::Client::new();
-            client
-                .post(format!("http://localhost:{port}/request_scan",))
-                .json(&params)
-                .send()
-                .await?;
-            params.clear();
-
-            tokio::time::sleep(Duration::from_secs(poll_interval as u64)).await;
+    if let Some(orc_dec) = orc_dec {
+        if let Some(orchard_bundle) = tx.orchard_bundle() {
+            for (vout, a) in orchard_bundle.actions().iter().enumerate() {
+                if let Some(note) =
+                    orc_dec.try_note_decryption(vout as u32 + wtx.orc_position, a)?
+                {
+                    notes.push(note);
+                }
+            }
         }
-        Ok::<_, anyhow::Error>(())
-    });
+    }
+    Ok(notes)
 }
 
-/*
-TODO
-Make reading commitment tree abstract -> size
-    We need the tree size and maintain a count of notes but we don't need the note commitment
-- note should have psi for orchard
+pub fn get_tree_size(tree: &str) -> Result<u32> {
+    let tree = hex::decode(tree)?;
+    if tree.is_empty() {
+        return Ok(0);
+    }
+    let tree = read_commitment_tree::<DummyNode, _, 32>(&*tree)?;
 
-scan_block
-    - remove spawn
-    - derive pivk sap/orch
-    - scan_one<Pool>
+    Ok(tree.size() as u32)
+}
 
-trait Pool
-    - pivk from ufvk
-    - try_note_decrypt
-    - cmx, epk, nf, extraction
-    - nf derivation
-    - note_count
-- database upgrade
+pub trait Pool {
+    type Address;
+    type PreparedIncomingViewingKey;
+    type NullifierKey;
+    type DiversifierKey;
+    type CompactOutput;
+    type Output;
+}
 
-*/
+pub struct Sapling;
+
+#[derive(Debug)]
+pub struct ReceivedNote {
+    pub txid: Hash,
+    pub position: u32,
+    pub height: u32,
+    pub address: String,
+    pub diversifier: [u8; 11],
+    pub diversifier_index: Option<u64>,
+    pub value: u64,
+    pub rcm: Hash,
+    pub nf: Hash,
+    pub rho: Option<Hash>,
+}
+
+#[derive(Debug)]
+pub struct MemoNote {
+    pub nf: Hash,
+    pub memo: String,
+}
+
+#[derive(Debug)]
+pub struct SpentNote {
+    pub nf: Hash,
+    pub txid: Hash,
+    pub value: u64,
+}
+
+#[derive(Debug)]
+pub enum ScanEvent {
+    Block(u32, Hash),
+    Received(ReceivedNote),
+    Spent(SpentNote),
+    Memo(MemoNote),
+}
+
+impl Pool for Sapling {
+    type Address = PaymentAddress;
+    type PreparedIncomingViewingKey = sapling_crypto::keys::PreparedIncomingViewingKey;
+    type NullifierKey = NullifierDerivingKey;
+    type DiversifierKey = DiversifiableFullViewingKey;
+    type CompactOutput = CompactSaplingOutput;
+    type Output = OutputDescription<[u8; 192]>;
+}
+
+pub trait Decode<P: Pool> {
+    fn try_compact_note_decryption(
+        &self,
+        network: &Network,
+        height: u32,
+        txid: &[u8],
+        position: u32,
+        output: &P::CompactOutput,
+    ) -> Result<Option<ReceivedNote>>;
+    fn try_note_decryption(&self, position: u32, output: &P::Output) -> Result<Option<MemoNote>>;
+    fn decrypt_diversifier(&self, address: &P::Address) -> Result<Option<u64>>;
+}
+
+pub struct Decoder<P: Pool> {
+    pub nk: P::NullifierKey,
+    pub dk: P::DiversifierKey,
+    pub pivk: P::PreparedIncomingViewingKey,
+    pub nfs: HashMap<Hash, u64>,
+}
+
+impl<P: Pool> Decoder<P> {
+    pub fn new(
+        nk: P::NullifierKey,
+        dk: P::DiversifierKey,
+        pivk: P::PreparedIncomingViewingKey,
+        nfs: &HashMap<Hash, u64>,
+    ) -> Self {
+        Self {
+            nk,
+            dk,
+            pivk,
+            nfs: nfs.clone(),
+        }
+    }
+
+    pub fn add_nf(&mut self, nf: Hash, value: u64) {
+        self.nfs.insert(nf, value);
+    }
+}
+
+impl Decode<Sapling> for Decoder<Sapling> {
+    fn try_compact_note_decryption(
+        &self,
+        network: &Network,
+        height: u32,
+        txid: &[u8],
+        position: u32,
+        output: &CompactSaplingOutput,
+    ) -> Result<Option<ReceivedNote>> {
+        let domain = SaplingDomain::new(Zip212Enforcement::On);
+        if let Some((note, pa)) = try_compact_note_decryption(&domain, &self.pivk, output) {
+            let address = pa.encode(network);
+            let diversifier = pa.diversifier().0;
+            let value = note.value().inner();
+            let rcm = note.rcm().to_bytes();
+            let nf = note.nf(&self.nk, position as u64);
+            let di = self.decrypt_diversifier(&pa)?;
+
+            let note = ReceivedNote {
+                txid: txid.try_into().unwrap(),
+                position,
+                height,
+                address,
+                diversifier,
+                diversifier_index: di,
+                value,
+                rcm,
+                nf: nf.to_vec().try_into().unwrap(),
+                rho: None,
+            };
+            return Ok(Some(note));
+        }
+        Ok(None)
+    }
+
+    fn try_note_decryption(
+        &self,
+        position: u32,
+        output: &OutputDescription<[u8; 192]>,
+    ) -> Result<Option<MemoNote>> {
+        let domain = SaplingDomain::new(Zip212Enforcement::On);
+        if let Some((note, _pa, memo_bytes)) = try_note_decryption(&domain, &self.pivk, output) {
+            let nf = note.nf(&self.nk, position as u64);
+            let memo_note = MemoNote {
+                nf: nf.0,
+                memo: memo_text(&memo_bytes)?,
+            };
+            return Ok(Some(memo_note));
+        }
+        Ok(None)
+    }
+
+    fn decrypt_diversifier(&self, address: &PaymentAddress) -> Result<Option<u64>> {
+        if let Some((di, _)) = self.dk.decrypt_diversifier(address) {
+            let di: u64 = di.try_into()?;
+            return Ok(Some(di));
+        }
+        Ok(None)
+    }
+}
+
+pub struct Orchard;
+
+impl Pool for Orchard {
+    type Address = Address;
+    type NullifierKey = FullViewingKey;
+    type DiversifierKey = orchard::keys::IncomingViewingKey;
+    type PreparedIncomingViewingKey = orchard::keys::PreparedIncomingViewingKey;
+    type CompactOutput = CompactOrchardAction;
+    type Output = Action<Signature<SpendAuth>>;
+}
+
+impl Decode<Orchard> for Decoder<Orchard> {
+    fn try_compact_note_decryption(
+        &self,
+        network: &Network,
+        height: u32,
+        txid: &[u8],
+        position: u32,
+        action: &CompactOrchardAction,
+    ) -> Result<Option<ReceivedNote>> {
+        let epk: &[u8; 32] = action.ephemeral_key.as_slice().try_into().unwrap();
+        let ca = CompactAction::from_parts(
+            Nullifier::from_bytes(action.nullifier.as_slice().try_into().unwrap()).unwrap(),
+            ExtractedNoteCommitment::from_bytes(action.cmx.as_slice().try_into().unwrap()).unwrap(),
+            EphemeralKeyBytes(*epk),
+            action.ciphertext.as_slice().try_into().unwrap(),
+        );
+        let domain = OrchardDomain::for_compact_action(&ca);
+        if let Some((note, address)) = try_compact_note_decryption(&domain, &self.pivk, &ca) {
+            let ua = unified::Receiver::Orchard(address.to_raw_address_bytes());
+            let ua = unified::Address::try_from_items(vec![ua])?;
+            let ua = ua.encode(&network.network_type());
+            let diversifier = *address.diversifier().as_array();
+            let value = note.value().inner();
+            let rcm = *note.rseed().as_bytes();
+            let nf = note.nullifier(&self.nk);
+            let rho = note.rho().to_bytes();
+            let di = self.decrypt_diversifier(&address)?;
+
+            let note = ReceivedNote {
+                txid: txid.try_into().unwrap(),
+                position,
+                height,
+                address: ua,
+                diversifier,
+                diversifier_index: di,
+                value,
+                rcm,
+                nf: nf.to_bytes(),
+                rho: Some(rho),
+            };
+            return Ok(Some(note));
+        }
+        Ok(None)
+    }
+
+    fn try_note_decryption(
+        &self,
+        _position: u32,
+        action: &Action<Signature<SpendAuth>>,
+    ) -> Result<Option<MemoNote>> {
+        let domain = OrchardDomain::for_action(action);
+        if let Some((note, _address, memo_bytes)) = try_note_decryption(&domain, &self.pivk, action)
+        {
+            let nf = note.nullifier(&self.nk);
+            let memo_note = MemoNote {
+                nf: nf.to_bytes(),
+                memo: memo_text(&memo_bytes)?,
+            };
+            return Ok(Some(memo_note));
+        }
+
+        Ok(None)
+    }
+
+    fn decrypt_diversifier(&self, address: &Address) -> Result<Option<u64>> {
+        if let Some(di) = self.dk.diversifier_index(address) {
+            let di: u64 = di.try_into()?;
+            return Ok(Some(di));
+        }
+        Ok(None)
+    }
+}
+
+// We don't need to know the commitment tree nodes because we are not
+// making transactions. However, we have to pretend to read it so that
+// we know how many nodes were used and derive the *position* of the
+// notes we receive
+pub struct DummyNode;
+
+impl HashSer for DummyNode {
+    fn read<R: std::io::Read>(mut reader: R) -> std::io::Result<Self>
+    where
+        Self: Sized,
+    {
+        let mut buf = [0u8; 32];
+        reader.read_exact(&mut buf)?;
+        Ok(DummyNode {})
+    }
+
+    fn write<W: std::io::Write>(&self, _writer: W) -> std::io::Result<()> {
+        unreachable!()
+    }
+}
+
+impl ShieldedOutput<SaplingDomain, 52> for CompactSaplingOutput {
+    fn ephemeral_key(&self) -> EphemeralKeyBytes {
+        let hash: Hash = self.epk.clone().try_into().unwrap();
+        EphemeralKeyBytes::from(hash)
+    }
+
+    fn cmstar_bytes(
+        &self,
+    ) -> <SaplingDomain as zcash_note_encryption::Domain>::ExtractedCommitmentBytes {
+        let hash: Hash = self.cmu.clone().try_into().unwrap();
+        hash
+    }
+
+    fn enc_ciphertext(&self) -> &[u8; 52] {
+        self.ciphertext.as_slice().try_into().unwrap()
+    }
+}
+
+#[derive(Debug)]
+pub struct WalletTx {
+    pub height: u32,
+    pub txid: Hash,
+    pub sap_position: u32,
+    pub orc_position: u32,
+}
+
+pub fn memo_text(memo_bytes: &[u8]) -> Result<String> {
+    let memo_bytes = MemoBytes::from_bytes(memo_bytes)?;
+    let memo = Memo::try_from(memo_bytes)?;
+    let memo = if let Memo::Text(memo) = memo {
+        memo.to_string()
+    } else {
+        String::new()
+    };
+    Ok(memo)
+}
+
+#[derive(Error, Debug)]
+pub enum ScanError {
+    #[error("Blockchain Reorganization")]
+    Reorganization,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::Db;
+
+    use super::*;
+    use anyhow::Result;
+
+    const FVK: &str = "uview1s5ranpd74zd2pseylw0fmt0cnudf9765mwjjd9mqf8tvjq2nlw9vgypzqayfvs7aeedguwl4r7exz50nrw6llfs3n9xfd4sm2slaay7smysc4yjyuwu3z7n5ccvyw70qkw28yt6xwra6c8d20ewpjeqq4enmftyly3fmn78hwwkyffp2y4x2vk8050vcly8y5fuse5s9e5j4wmwuldemxahrp4zrgatj63mnpqlpacvcudqfsm5ee29pj8lr5wt93eyrx3fwa64m6505cge6n46c7eqw59e0n3m9rmsntcflfmu9wyjgfk2pmjf4npkml93vyq0fps2rh4mdwpz4ld059m6mamjht99j7sdypwx52lj6lvrfgwja4uf7qy2g8d6gkmvkh7u4dksq5gazxvye4gtwfgwmuygg2sqmkkf4fjd3ymf0mq99rhf0trsl0lpddw64r4n7jj7mxy6fcpj64vkx0pre2lla9p8nknrt2c33zy3vaczd";
+
+    #[tokio::test]
+    async fn test() -> Result<()> {
+        let mut client = CompactTxStreamerClient::connect("https://zec.rocks".to_string()).await?;
+
+        let prev_hash =
+            hex::decode("5f03d35ae940bb840564c3b7af7ab72255096d3eca15c910c0e40d0000000000")
+                .unwrap();
+        let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&Network::Main, FVK).unwrap();
+        let mut sap_dec = ufvk.sapling().map(|fvk| {
+            let nk = fvk.fvk().vk.nk;
+            let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
+            let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
+            Decoder::<Sapling>::new(nk, fvk.clone(), pivk, &HashMap::new())
+        });
+        let mut orc_dec = ufvk.orchard().map(|fvk| {
+            let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
+            let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
+            Decoder::<Orchard>::new(fvk.clone(), ivk, pivk, &HashMap::new())
+        });
+
+        let events = scan(
+            &Network::Main,
+            &mut client,
+            2_890_000,
+            2_900_000,
+            &prev_hash.try_into().unwrap(),
+            &mut sap_dec,
+            &mut orc_dec,
+        )
+        .await?;
+
+        println!("{events:?}");
+
+        let db = Db::new(Network::Main, "zec-wallet-test.db", &ufvk).await?;
+        db.store_events(&events).await?;
+
+        Ok(())
+    }
+}
