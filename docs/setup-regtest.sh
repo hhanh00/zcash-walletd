@@ -7,7 +7,7 @@ zcash-cli --datadir=regtest z_getnewaccount
 zcash-cli --datadir=regtest z_getaddressforaccount 0
 UA=`zcash-cli --datadir=regtest listaddresses | jq -r '.[0].unified[0].addresses[0].address'`
 zcash-cli --datadir=regtest z_shieldcoinbase '*' $UA
-sleep 5
+sleep 10
 zcash-cli --datadir=regtest z_getoperationresult
 zcash-cli --datadir=regtest generate 10
 sleep 1

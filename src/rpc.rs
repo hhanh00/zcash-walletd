@@ -317,10 +317,13 @@ pub async fn request_scan(
     Ok(())
 }
 
-pub async fn notify_tx(tx_id: &[u8], notify_tx_url: &str) -> Result<()> {
-    let mut tx_id = tx_id.to_vec();
-    tx_id.reverse();
-    let url = notify_tx_url.to_string() + &hex::encode(&tx_id);
+pub async fn notify_tx(txid: &[u8], notify_tx_url: &str) -> Result<()> {
+    let mut txid = txid.to_vec();
+    txid.reverse();
+    let txid = hex::encode(&txid);
+    info!("Found tx {}", &txid);
+
+    let url = notify_tx_url.to_string() + &txid;
     // TODO: Remove self signed certificate accept
     let res = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)

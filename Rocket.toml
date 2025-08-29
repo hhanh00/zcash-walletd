@@ -1,10 +1,10 @@
 [default]
-db_path = "zec-wallet-test.db"
+db_path = "zec-wallet.db"
 confirmations = 6
-lwd_url = "http://127.0.0.1:9067"
+lwd_url = "https://zec.rocks"
 notify_tx_url = "http://btcpayserver:9000/zcashlikedaemoncallback/tx?cryptoCode=zec&hash="
 poll_interval = 60
-regtest = true
+regtest = false
 orchard = true
 
 [debug]
