@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.1...zcash-walletd-v1.1.2) (2025-08-29)
+
+
+### Bug Fixes
+
+* return original UA in transfers ([#39](https://github.com/hhanh00/zcash-walletd/issues/39)) ([975cc84](https://github.com/hhanh00/zcash-walletd/commit/975cc84c6b59bb3022e622a966b905e278779692))
+* update docker image build script to latest version ([#37](https://github.com/hhanh00/zcash-walletd/issues/37)) ([86dc563](https://github.com/hhanh00/zcash-walletd/commit/86dc5638f04e9ecd3f56a891e7b73f7cadfdb54d))
+
 ## [1.1.1](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.0...zcash-walletd-v1.1.1) (2025-08-29)
 
 
