@@ -281,7 +281,7 @@ pub async fn request_scan(
         .map_err(anyhow::Error::new)?;
     let end = get_latest_height(&mut client).await?;
 
-    println!("Scan from {start} to {end}");
+    info!("Scan from {start} to {end}");
     if start >= end {
         return Ok(());
     }

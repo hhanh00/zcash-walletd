@@ -90,7 +90,7 @@ pub async fn scan(
         let height = block.height as u32;
         let block_prev_hash: Hash = block.prev_hash.try_into().unwrap();
         if prev_hash != block_prev_hash {
-            println!("{} {}", block.height, hex::encode(block_prev_hash));
+            info!("Reorg at {} {}", block.height, hex::encode(block_prev_hash));
             return Err(ScanError::Reorganization);
         }
         prev_hash = block.hash.try_into().unwrap();
