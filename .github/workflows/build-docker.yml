@@ -15,7 +15,6 @@ jobs:
         with:
           images: |
             hhanh00/zcash-walletd
-            ghcr.io/username/app
           tags: |
             type=semver,pattern={{version}},match=v(\d.\d.\d)$
 
@@ -38,3 +37,4 @@ jobs:
           file: docker/Dockerfile
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          push: true
