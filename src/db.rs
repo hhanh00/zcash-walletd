@@ -247,7 +247,7 @@ impl Db {
         let transfers = sqlx::query(
             "SELECT address, n.value, sub_account, txid, memo, n.height \
             FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
-            account = ?1",
+            account = ?1 ORDER BY n.height",
         )
         .bind(account_index)
         .map(|row| Self::row_to_transfer(row, latest_height, account_index, confirmations))
@@ -275,7 +275,7 @@ impl Db {
         let transfers = sqlx::query(
             "SELECT address, n.value, sub_account, txid, memo, n.height \
             FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
-            txid = ?1",
+            txid = ?1 ORDER BY n.height",
         )
         .bind(txid)
         .map(|row| Self::row_to_transfer(row, latest_height, account_index, confirmations))
