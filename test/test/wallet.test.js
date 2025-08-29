@@ -83,6 +83,7 @@ describe('POST /request_scan', function () {
         "account_index": 0, "in": true, "subaddr_indices": [0]
       });
     const incoming = res2.body.in;
+    console.log(JSON.stringify(incoming));
     expect(incoming[0].address).to.equal("uregtest1av9vk3kqw6fepl3t2h9ra98ymzvq4xhq0rudsqt7s4k9xmlmwt6mfk8zpscvqjvu3atu679llpp98wc2wt3myvgzhf8ufpk82q3fvxnh");
     expect(incoming[0].amount).to.equal(540000000);
     expect(incoming[0].height).to.equal(161);

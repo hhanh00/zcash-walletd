@@ -1,11 +1,13 @@
 use crate::account::{Account, AccountBalance, SubAccount};
+use crate::lwd_rpc::BlockId;
 use crate::network::Network;
 use crate::scan::ScanEvent;
 use crate::transaction::{SubAddress, Transfer};
-use crate::Hash;
+use crate::{Client, Hash};
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
+use tonic::Request;
 use std::collections::HashMap;
 use zcash_keys::address::UnifiedAddress;
 use zcash_keys::encoding::AddressCodec;
@@ -245,7 +247,7 @@ impl Db {
         let transfers = sqlx::query(
             "SELECT address, n.value, sub_account, txid, memo, n.height \
             FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
-            account = ?1",
+            account = ?1 ORDER BY n.height",
         )
         .bind(account_index)
         .map(|row| Self::row_to_transfer(row, latest_height, account_index, confirmations))
@@ -273,7 +275,7 @@ impl Db {
         let transfers = sqlx::query(
             "SELECT address, n.value, sub_account, txid, memo, n.height \
             FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
-            txid = ?1",
+            txid = ?1 ORDER BY n.height",
         )
         .bind(txid)
         .map(|row| Self::row_to_transfer(row, latest_height, account_index, confirmations))
@@ -302,6 +304,38 @@ impl Db {
             .execute(&mut *connection)
             .await?;
 
+        Ok(())
+    }
+
+    pub async fn fetch_block_hash(
+        &self,
+        client: &mut Client,
+        height: u32,
+    ) -> Result<()> {
+        let mut connection = self.pool.acquire().await?;
+        if sqlx::query("SELECT 1 FROM blocks WHERE height = ?1")
+            .bind(height)
+            .fetch_optional(&mut *connection)
+            .await?
+            .is_none()
+        {
+            let b = client
+                .get_block(Request::new(BlockId {
+                    height: height as u64,
+                    hash: vec![],
+                }))
+                .await?
+                .into_inner();
+            let hash: Hash = b.hash.try_into().unwrap();
+            sqlx::query(
+                "INSERT INTO blocks(hash, height)
+            VALUES (?1, ?2)",
+            )
+            .bind(hash.as_slice())
+            .bind(height)
+            .execute(&mut *connection)
+            .await?;
+        }
         Ok(())
     }
 
@@ -428,7 +462,13 @@ impl Db {
         for event in events {
             match event {
                 ScanEvent::Received(received_note) => {
-                    let id_tx = self.create_tx_if_not_exists(received_note.height, received_note.txid.as_slice(), db_tx).await?;
+                    let id_tx = self
+                        .create_tx_if_not_exists(
+                            received_note.height,
+                            received_note.txid.as_slice(),
+                            db_tx,
+                        )
+                        .await?;
                     let (account, sub_account) = match sqlx::query(
                         "SELECT a.account, a.sub_account FROM addresses a
                         JOIN receivers r ON a.id_address = r.id_address
@@ -517,7 +557,12 @@ impl Db {
                         .await?;
                 }
                 ScanEvent::Spent(spent_note) => {
-                    self.create_tx_if_not_exists(spent_note.height, spent_note.txid.as_slice(), db_tx).await?;
+                    self.create_tx_if_not_exists(
+                        spent_note.height,
+                        spent_note.txid.as_slice(),
+                        db_tx,
+                    )
+                    .await?;
                     sqlx::query("UPDATE received_notes SET spent = TRUE WHERE nf = ?1")
                         .bind(spent_note.nf.as_slice())
                         .execute(&mut *db_tx)
@@ -552,7 +597,12 @@ impl Db {
         Ok(())
     }
 
-    pub async fn create_tx_if_not_exists(&self, height: u32, txid: &[u8], db_tx: &mut SqliteConnection) -> Result<u32> {
+    pub async fn create_tx_if_not_exists(
+        &self,
+        height: u32,
+        txid: &[u8],
+        db_tx: &mut SqliteConnection,
+    ) -> Result<u32> {
         // let txid = &received_note.txid;
         let id_tx = match sqlx::query("SELECT id_tx FROM transactions WHERE txid = ?1")
             .bind(txid)
@@ -569,6 +619,9 @@ impl Db {
                         .execute(db_tx)
                         .await?;
                 let id_tx = r.last_insert_rowid();
+                let mut rtxid = txid.to_vec();
+                rtxid.reverse();
+                info!("Found tx {}", hex::encode(&rtxid));
                 id_tx as u32
             }
         };

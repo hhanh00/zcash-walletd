@@ -16,7 +16,7 @@ pub use crate::rpc::*;
 use anyhow::{anyhow, Result};
 use network::Network;
 use std::str::FromStr;
-use tonic::{transport::Channel, Request};
+use tonic::transport::Channel;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
@@ -47,9 +47,8 @@ struct Args {
 
 use crate::{
     db::Db,
-    lwd_rpc::{compact_tx_streamer_client::CompactTxStreamerClient, BlockId},
+    lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient,
     monitor::monitor_task,
-    scan::ScanEvent,
 };
 use anyhow::Context;
 use rocket::fairing::AdHoc;
@@ -109,18 +108,9 @@ async fn main() -> Result<()> {
     let db_exists = db.create().await?;
     if !db_exists {
         db.new_account("").await?;
-        let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone()).await?;
-        let b = client
-            .get_block(Request::new(BlockId {
-                height: birth_height as u64,
-                hash: vec![],
-            }))
-            .await?
-            .into_inner();
-        let hash: Hash = b.hash.try_into().unwrap();
-        db.store_events(&[ScanEvent::Block(birth_height, hash)])
-            .await?;
     }
+    let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone()).await?;
+    db.fetch_block_hash(&mut client, birth_height).await?;
 
     monitor_task(config.port, config.poll_interval).await;
     rocket
