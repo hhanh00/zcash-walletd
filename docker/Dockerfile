@@ -1,12 +1,12 @@
 #syntax=docker/dockerfile:1.2
-FROM rust:1.57 as builder
+FROM rust:latest as builder
 
 RUN rustup component add rustfmt
 COPY . /zcash-walletd
 
 RUN cd /zcash-walletd && cargo build --release
 
-FROM debian:bullseye-slim
+FROM debian:latest
 
 RUN apt-get update && apt-get install -y --no-install-recommends sqlite3 ca-certificates
 RUN update-ca-certificates
