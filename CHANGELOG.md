@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.3](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.2...zcash-walletd-v1.1.3) (2025-08-29)
+
+
+### Bug Fixes
+
+* release new docker image ([#43](https://github.com/hhanh00/zcash-walletd/issues/43)) ([abf7551](https://github.com/hhanh00/zcash-walletd/commit/abf7551f05afd3d117880096b140865d7adf4a73))
+
 ## [1.1.2](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.1...zcash-walletd-v1.1.2) (2025-08-29)
 
 
