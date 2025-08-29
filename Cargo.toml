@@ -21,6 +21,7 @@ clap = { version = "3.0.0", features = ["derive"] }
 
 # REST / RPC
 rocket = { version = "0.5.0-rc.1", features = [ "json" ] }
+figment = { version = "0.10", features = [ "json" ] }
 tonic = { version = "0.4.3", features = ["tls", "tls-roots"] }
 prost = "0.7"
 reqwest = { version = "0.11.6", features = ["json"] }

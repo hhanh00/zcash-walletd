@@ -14,8 +14,9 @@ mod transaction;
 
 pub use crate::rpc::*;
 use anyhow::{anyhow, Result};
+use figment::providers::{Env, Format, Json};
 use network::Network;
-use std::str::FromStr;
+use std::path::Path;
 use tonic::transport::Channel;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{
@@ -46,16 +47,13 @@ struct Args {
 // pub const NOTIFY_TX_URL: &str = "https://localhost:14142/zcashlikedaemoncallback/tx?cryptoCode=yec&hash=";
 
 use crate::{
-    db::Db,
-    lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient,
-    monitor::monitor_task,
+    db::Db, lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient, monitor::monitor_task,
 };
-use anyhow::Context;
 use rocket::fairing::AdHoc;
 use serde::Deserialize;
 use zcash_client_backend::keys::UnifiedFullViewingKey;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub struct WalletConfig {
     port: u16,
     db_path: String,
@@ -65,6 +63,8 @@ pub struct WalletConfig {
     poll_interval: u16,
     regtest: bool,
     orchard: bool,
+    vk: String,
+    birth_height: u32,
 }
 
 impl WalletConfig {
@@ -81,29 +81,31 @@ impl WalletConfig {
 async fn main() -> Result<()> {
     dotenv::dotenv().ok();
     env_logger::init();
+    let config_path = dotenv::var("CONFIG_PATH")
+        .ok()
+        .unwrap_or("/data/config.json".to_string());
     let _ = Registry::default()
         .with(default_layer())
         .with(env_layer())
         .try_init();
     let rocket = rocket::build();
-    let figment = rocket.figment();
-    let mut config: WalletConfig = figment.extract().unwrap();
-    let ufvk = dotenv::var("VK")
-        .context("Seed missing from .env file")
-        .unwrap();
+    let mut figment = rocket.figment().clone();
+    figment = figment.merge(Env::raw());
+    info!("figment {figment:?}");
+    let config = Path::new(&config_path);
+    if config.exists() {
+        figment = figment.merge(Json::file(config_path));
+    }
+
+    let config: WalletConfig = figment.extract().unwrap();
+    info!("Config {config:?}");
     let network = config.network();
     assert!(config.orchard);
 
-    let notify_tx_url = dotenv::var("NOTIFY_TX_URL").ok();
-    let ufvk = UnifiedFullViewingKey::decode(&network, &ufvk)
+    let ufvk = &config.vk;
+    let birth_height = config.birth_height;
+    let ufvk = UnifiedFullViewingKey::decode(&network, ufvk)
         .map_err(|_| anyhow!("Invalid Unified Viewing Key"))?;
-    if let Some(notify_tx_url) = notify_tx_url {
-        config.notify_tx_url = notify_tx_url;
-    }
-    let birth_height = dotenv::var("BIRTH_HEIGHT")
-        .ok()
-        .map(|h| u32::from_str(&h).unwrap())
-        .expect("Birth Height MUST be specified");
     let db = Db::new(network, &config.db_path, &ufvk).await?;
     let db_exists = db.create().await?;
     if !db_exists {
@@ -115,6 +117,7 @@ async fn main() -> Result<()> {
     monitor_task(config.port, config.poll_interval).await;
     rocket
         .manage(db)
+        .manage(config)
         .mount(
             "/",
             routes![
@@ -129,7 +132,6 @@ async fn main() -> Result<()> {
                 request_scan,
             ],
         )
-        .attach(AdHoc::config::<WalletConfig>())
         .launch()
         .await?;
 

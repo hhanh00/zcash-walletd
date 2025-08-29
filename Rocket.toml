@@ -1,4 +1,4 @@
-[global]
+[default]
 db_path = "zec-wallet-test.db"
 confirmations = 6
 lwd_url = "http://127.0.0.1:9067"
