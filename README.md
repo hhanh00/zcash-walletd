@@ -11,7 +11,7 @@ which allows it to be used interchangeably in some cases.
 
 ### Account Management
 
-Create diversified addresses on demand and map them to account # 
+Create diversified addresses on demand and map them to account #
 and sub account #. BTCPay associates each store to an account and
 each invoice into a sub account.
 
@@ -54,3 +54,7 @@ To build a docker image: Run from the project directory
 ```
 
 The latest image is available on DockerHub under `hhanh00/zcash-walletd:latest`
+
+## Orchard
+Support for Orchard and UA was added in 1.1.2. You MUST delete the database file
+because the previous schema is not compatible.
