@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.1](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.0...zcash-walletd-v1.1.1) (2025-08-29)
+
+
+### Bug Fixes
+
+* config ([#34](https://github.com/hhanh00/zcash-walletd/issues/34)) ([1edde7c](https://github.com/hhanh00/zcash-walletd/commit/1edde7c54f09883558b103a53eed6ac442cd3ed4))
+* missing call to tx_notify ([#35](https://github.com/hhanh00/zcash-walletd/issues/35)) ([aa1580a](https://github.com/hhanh00/zcash-walletd/commit/aa1580a9b280ee001c6ed0ac1dc70a367d39c3f2))
+* retrieve hash at birth height ([#32](https://github.com/hhanh00/zcash-walletd/issues/32)) ([8579df7](https://github.com/hhanh00/zcash-walletd/commit/8579df7835e7d2567dd12d0c0f41380ce8e2d75d))
+
 ## [1.1.0](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.0.0...zcash-walletd-v1.1.0) (2025-08-29)
 
 
