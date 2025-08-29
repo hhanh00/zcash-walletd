@@ -1,12 +1,12 @@
 use rocket::serde::{Deserialize, Serialize};
 
-#[derive(Default, Serialize, Deserialize, Clone)]
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct SubAddress {
     pub major: u32,
     pub minor: u32,
 }
 
-#[derive(Default, Serialize, Deserialize, Clone)]
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct Transfer {
     pub address: String,
     pub amount: u64,

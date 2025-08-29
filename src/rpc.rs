@@ -105,7 +105,7 @@ pub struct GetTransactionByIdRequest {
     pub account_index: u32,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct GetTransactionByIdResponse {
     pub transfer: Transfer,
     pub transfers: Vec<Transfer>,
@@ -134,6 +134,7 @@ pub async fn get_transaction(
         transfer: transfers[0].clone(),
         transfers,
     };
+    info!("{rep:?}");
     Ok(Json(rep))
 }
 

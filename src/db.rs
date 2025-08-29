@@ -276,9 +276,13 @@ impl Db {
         let mut txid = hex::decode(txid)?;
         txid.reverse();
         let transfers = sqlx::query(
-            "SELECT address, n.value, sub_account, txid, memo, n.height \
-            FROM received_notes n JOIN transactions t ON n.id_tx = t.id_tx WHERE \
-            txid = ?1 ORDER BY n.height",
+            "SELECT a.address, n.value, n.sub_account, txid, memo, n.height
+            FROM received_notes n
+			JOIN transactions t ON n.id_tx = t.id_tx
+			JOIN receivers r ON n.address = r.receiver_address
+			JOIN addresses a ON a.id_address = r.id_address
+            WHERE txid = ?1
+			ORDER BY n.height",
         )
         .bind(txid)
         .map(|row| Self::row_to_transfer(row, latest_height, account_index, confirmations))
