@@ -321,7 +321,7 @@ pub async fn notify_tx(txid: &[u8], notify_tx_url: &str) -> Result<()> {
     let mut txid = txid.to_vec();
     txid.reverse();
     let txid = hex::encode(&txid);
-    info!("Found tx {}", &txid);
+    info!("Notify tx {}", &txid);
 
     let url = notify_tx_url.to_string() + &txid;
     // TODO: Remove self signed certificate accept
