@@ -582,7 +582,7 @@ mod tests {
 
         println!("{events:?}");
 
-        let db = Db::new(Network::Main, "zec-wallet-test.db", &ufvk).await?;
+        let db = Db::new(Network::Main, "zec-wallet-test.db", &ufvk, "").await?;
         db.store_events(&events).await?;
 
         Ok(())

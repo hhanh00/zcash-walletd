@@ -3,7 +3,7 @@ use crate::lwd_rpc::BlockId;
 use crate::network::Network;
 use crate::scan::ScanEvent;
 use crate::transaction::{SubAddress, Transfer};
-use crate::{Client, Hash};
+use crate::{notify_tx, Client, Hash};
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
@@ -18,6 +18,7 @@ pub struct Db {
     network: Network,
     pool: SqlitePool,
     ufvk: UnifiedFullViewingKey,
+    notify_tx_url: String,
 }
 
 impl Db {
@@ -25,6 +26,7 @@ impl Db {
         network: Network,
         db_path: &str,
         ufvk: &UnifiedFullViewingKey,
+        notify_tx_url: &str,
     ) -> Result<Self> {
         let options = SqliteConnectOptions::new()
             .filename(db_path)
@@ -34,6 +36,7 @@ impl Db {
             network,
             pool,
             ufvk: ufvk.clone(),
+            notify_tx_url: notify_tx_url.to_string(),
         })
     }
 
@@ -619,9 +622,9 @@ impl Db {
                         .execute(db_tx)
                         .await?;
                 let id_tx = r.last_insert_rowid();
-                let mut rtxid = txid.to_vec();
-                rtxid.reverse();
-                info!("Found tx {}", hex::encode(&rtxid));
+
+                notify_tx(txid, &self.notify_tx_url).await?;
+
                 id_tx as u32
             }
         };

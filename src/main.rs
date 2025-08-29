@@ -49,7 +49,6 @@ struct Args {
 use crate::{
     db::Db, lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient, monitor::monitor_task,
 };
-use rocket::fairing::AdHoc;
 use serde::Deserialize;
 use zcash_client_backend::keys::UnifiedFullViewingKey;
 
@@ -106,7 +105,7 @@ async fn main() -> Result<()> {
     let birth_height = config.birth_height;
     let ufvk = UnifiedFullViewingKey::decode(&network, ufvk)
         .map_err(|_| anyhow!("Invalid Unified Viewing Key"))?;
-    let db = Db::new(network, &config.db_path, &ufvk).await?;
+    let db = Db::new(network, &config.db_path, &ufvk, &config.notify_tx_url).await?;
     let db_exists = db.create().await?;
     if !db_exists {
         db.new_account("").await?;
