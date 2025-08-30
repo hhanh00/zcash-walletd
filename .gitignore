@@ -2,3 +2,5 @@ node_modules/
 public/
 resources/_gen/
 .hugo_build.lock
+target/
+regtest/
