@@ -19,7 +19,7 @@ jobs:
           version: latest
       - name: Pull zcashd package
         run: |
-          oras login ghcr.io -u hhanh00 --password $GHCR_PASSWORD
+          echo $GHCR_PASSWORD | oras login ghcr.io -u hhanh00 --password-stdin
           oras pull ghcr.io/hhanh00/zcashd:6.3.0
           tar xvzf zcashd.tar.gz
           echo "$PWD/zcashd" >> $GITHUB_PATH
