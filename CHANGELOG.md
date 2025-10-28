@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.4](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.3...zcash-walletd-v1.1.4) (2025-10-28)
+
+
+### Bug Fixes
+
+* race condition possibility in account/address creation ([#46](https://github.com/hhanh00/zcash-walletd/issues/46)) ([dc84da2](https://github.com/hhanh00/zcash-walletd/commit/dc84da2b6299243469125c0075f712e9347ca08d))
+
 ## [1.1.3](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.2...zcash-walletd-v1.1.3) (2025-08-29)
 
 
