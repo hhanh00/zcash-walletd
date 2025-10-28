@@ -7,6 +7,7 @@ use crate::{notify_tx, Client, Hash};
 use anyhow::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteRow};
 use sqlx::{Acquire, Row, SqliteConnection, SqlitePool};
+use tokio::sync::Mutex;
 use tonic::Request;
 use std::collections::HashMap;
 use zcash_keys::address::UnifiedAddress;
@@ -19,6 +20,7 @@ pub struct Db {
     pool: SqlitePool,
     ufvk: UnifiedFullViewingKey,
     notify_tx_url: String,
+    address_creation_lock: Mutex<()>,
 }
 
 impl Db {
@@ -37,10 +39,12 @@ impl Db {
             pool,
             ufvk: ufvk.clone(),
             notify_tx_url: notify_tx_url.to_string(),
+            address_creation_lock: Mutex::new(()),
         })
     }
 
     pub async fn new_account(&self, name: &str) -> Result<Account> {
+        let _guard = self.address_creation_lock.lock().await;
         let mut connection = self.pool.acquire().await?;
         let (id_account,): (Option<u32>,) = sqlx::query_as("SELECT MAX(account) FROM addresses")
             .fetch_one(&mut *connection)
@@ -65,6 +69,7 @@ impl Db {
     }
 
     pub async fn new_sub_account(&self, id_account: u32, name: &str) -> Result<SubAccount> {
+        let _guard = self.address_creation_lock.lock().await;
         let mut connection = self.pool.acquire().await?;
         let (id_sub_account,): (u32,) =
             sqlx::query_as("SELECT MAX(sub_account) FROM addresses WHERE account = ?1")
