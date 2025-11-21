@@ -1,4 +1,4 @@
-`zcash-walletd` is a shielded only (sapling) REST wallet
+`zcash-walletd` is a shielded only (sapling, orchard, UA) REST wallet
 for zcash.
 
 Primary intended to work with the BTCPayServer payment gateway,
