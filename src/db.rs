@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use zcash_keys::address::UnifiedAddress;
 use zcash_keys::encoding::AddressCodec;
 use zcash_keys::keys::{UnifiedAddressRequest, UnifiedFullViewingKey};
-use zcash_primitives::consensus::{NetworkUpgrade, Parameters};
+use zcash_protocol::consensus::{NetworkUpgrade, Parameters};
 
 pub struct Db {
     network: Network,

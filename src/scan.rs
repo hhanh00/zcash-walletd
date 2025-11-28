@@ -559,12 +559,12 @@ mod tests {
         let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&Network::Main, FVK).unwrap();
         let mut sap_dec = ufvk.sapling().map(|fvk| {
             let nk = fvk.fvk().vk.nk;
-            let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
+            let ivk = fvk.to_ivk(zip32::Scope::External);
             let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
             Decoder::<Sapling>::new(nk, fvk.clone(), pivk, &HashMap::new())
         });
         let mut orc_dec = ufvk.orchard().map(|fvk| {
-            let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
+            let ivk = fvk.to_ivk(zip32::Scope::External);
             let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
             Decoder::<Orchard>::new(fvk.clone(), ivk, pivk, &HashMap::new())
         });
