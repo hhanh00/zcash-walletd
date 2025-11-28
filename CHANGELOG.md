@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.5](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.4...zcash-walletd-v1.1.5) (2025-11-28)
+
+
+### Bug Fixes
+
+* support for NU6.1 ([#49](https://github.com/hhanh00/zcash-walletd/issues/49)) ([59d9b83](https://github.com/hhanh00/zcash-walletd/commit/59d9b83dde8724ff58f6ca8d5eed220ed80ed06c))
+
 ## [1.1.4](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.3...zcash-walletd-v1.1.4) (2025-10-28)
 
 
