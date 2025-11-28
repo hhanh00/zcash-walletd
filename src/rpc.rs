@@ -265,13 +265,13 @@ pub async fn request_scan(
     let nfs = db.get_nfs().await?;
     let mut sap_dec = ufvk.sapling().map(|fvk| {
         let nk = fvk.fvk().vk.nk;
-        let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
+        let ivk = fvk.to_ivk(zip32::Scope::External);
         let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
         // TODO: Load nfs
         Decoder::<Sapling>::new(nk, fvk.clone(), pivk, &nfs)
     });
     let mut orc_dec = ufvk.orchard().map(|fvk| {
-        let ivk = fvk.to_ivk(zcash_primitives::zip32::Scope::External);
+        let ivk = fvk.to_ivk(zip32::Scope::External);
         let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
         // TODO: Load nfs
         Decoder::<Orchard>::new(fvk.clone(), ivk, pivk, &nfs)
