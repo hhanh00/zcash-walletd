@@ -130,6 +130,9 @@ pub async fn get_transaction(
             config.confirmations,
         )
         .await?;
+    if transfers.is_empty() {
+        return Err(anyhow::anyhow!("Unknown txid {}", &request.txid).into());
+    }
     let rep = GetTransactionByIdResponse {
         transfer: transfers[0].clone(),
         transfers,
