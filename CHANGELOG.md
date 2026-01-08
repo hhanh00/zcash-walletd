@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.6](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.5...zcash-walletd-v1.1.6) (2026-01-08)
+
+
+### Bug Fixes
+
+* notify_tx called before db_tx.commit ([#55](https://github.com/hhanh00/zcash-walletd/issues/55)) ([6c11fb1](https://github.com/hhanh00/zcash-walletd/commit/6c11fb19f7c999c4f421b91a44fdd2783fed669e))
+* return error for unknown txid ([#51](https://github.com/hhanh00/zcash-walletd/issues/51)) ([617136c](https://github.com/hhanh00/zcash-walletd/commit/617136c72f30c5a9b33dec72ff13826a2af4cda8))
+
 ## [1.1.5](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.4...zcash-walletd-v1.1.5) (2025-11-28)
 
 
