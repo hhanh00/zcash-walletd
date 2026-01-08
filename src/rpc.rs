@@ -5,10 +5,12 @@ use crate::lwd_rpc::*;
 use crate::scan::{get_latest_height, Decoder, Orchard, Sapling, ScanError};
 use crate::transaction::Transfer;
 use crate::{from_tonic, WalletConfig};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use rocket::response::Debug;
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::State;
+use std::time::Instant;
+use tokio::time::{sleep, Duration};
 use tonic::Request;
 
 #[derive(Serialize, Deserialize)]
@@ -122,16 +124,37 @@ pub async fn get_transaction(
         .await
         .map_err(from_tonic)?;
     let latest_height = get_latest_height(&mut client).await?;
-    let transfers = db
-        .get_transfers_by_txid(
-            latest_height,
-            &request.txid,
-            request.account_index,
-            config.confirmations,
-        )
-        .await?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut backoff_ms: u64 = 100;
+
+    let transfers = loop {
+        let transfers = db
+            .get_transfers_by_txid(
+                latest_height,
+                &request.txid,
+                request.account_index,
+                config.confirmations,
+            )
+            .await?;
+
+        if !transfers.is_empty() {
+            break transfers;
+        }
+
+        if Instant::now() >= deadline {
+            break transfers;
+        }
+
+        sleep(Duration::from_millis(backoff_ms)).await;
+        backoff_ms = (backoff_ms * 2).min(1000);
+    };
+
     if transfers.is_empty() {
-        return Err(anyhow::anyhow!("Unknown txid {}", &request.txid).into());
+        return Err(Debug(anyhow!(
+            "transfer not yet available for txid {} (account_index {})",
+            request.txid,
+            request.account_index
+        )));
     }
     let rep = GetTransactionByIdResponse {
         transfer: transfers[0].clone(),
