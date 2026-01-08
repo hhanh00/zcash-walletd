@@ -4715,7 +4715,7 @@ dependencies = [
 
 [[package]]
 name = "zcash-walletd"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "anyhow",
  "bls12_381 0.4.0",
