@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.7](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.6...zcash-walletd-v1.1.7) (2026-01-15)
+
+
+### Bug Fixes
+
+* cleanup stale data at startup ([#56](https://github.com/hhanh00/zcash-walletd/issues/56)) ([3aad080](https://github.com/hhanh00/zcash-walletd/commit/3aad080806216c9effc2d86fcecaf584ec9045a0))
+
 ## [1.1.6](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.5...zcash-walletd-v1.1.6) (2026-01-08)
 
 
