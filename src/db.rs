@@ -43,6 +43,14 @@ impl Db {
         })
     }
 
+    async fn cleanup_stale_data(connection: &mut SqliteConnection) -> Result<()> {
+        sqlx::query("DELETE FROM received_notes WHERE height >=
+            (SELECT MAX(height) FROM blocks)")
+        .execute(connection)
+        .await?;
+        Ok(())
+    }
+
     pub async fn new_account(&self, name: &str) -> Result<Account> {
         let _guard = self.address_creation_lock.lock().await;
         let mut connection = self.pool.acquire().await?;
@@ -445,6 +453,8 @@ impl Db {
         )
         .execute(&mut *connection)
         .await?;
+
+        Self::cleanup_stale_data(&mut connection).await?;
 
         if sqlx::query("SELECT 1 FROM pragma_table_info('received_notes') WHERE name = 'rho'")
             .fetch_optional(&mut *connection)
