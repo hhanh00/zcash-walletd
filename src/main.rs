@@ -129,6 +129,7 @@ async fn main() -> Result<()> {
                 get_height,
                 sync_info,
                 request_scan,
+                reorg,
             ],
         )
         .launch()

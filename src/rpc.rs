@@ -307,7 +307,7 @@ pub async fn request_scan(
             match error {
                 ScanError::Reorganization => {
                     let synced_height = db.get_synced_height().await?;
-                    db.truncate_height(synced_height - config.confirmations)
+                    db.truncate_height(synced_height - SAFE_REORG_DISTANCE)
                         .await
                 }
                 ScanError::Other(error) => Err(error),
@@ -318,6 +318,18 @@ pub async fn request_scan(
             db.store_events(&events).await?;
         }
     }
+    Ok(())
+}
+
+pub const SAFE_REORG_DISTANCE: u32 = 100u32;
+
+#[post("/reorg")]
+pub async fn reorg(
+    db: &State<Db>,
+) -> Result<(), Debug<anyhow::Error>> {
+    let synced_height = db.get_synced_height().await?;
+    db.truncate_height(synced_height - SAFE_REORG_DISTANCE)
+        .await?;
     Ok(())
 }
 
