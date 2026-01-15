@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.8](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.7...zcash-walletd-v1.1.8) (2026-01-15)
+
+
+### Bug Fixes
+
+* rollback back 100 blocks on a reorg ([#58](https://github.com/hhanh00/zcash-walletd/issues/58)) ([6b9489f](https://github.com/hhanh00/zcash-walletd/commit/6b9489f33033d0a76e70a508cef7d7f64fc10710))
+
 ## [1.1.7](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.6...zcash-walletd-v1.1.7) (2026-01-15)
 
 
