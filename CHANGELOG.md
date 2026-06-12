@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.9](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.8...zcash-walletd-v1.1.9) (2026-06-12)
+
+
+### Bug Fixes
+
+* update orchard for NU 6.2 ([#61](https://github.com/hhanh00/zcash-walletd/issues/61)) ([d37afc5](https://github.com/hhanh00/zcash-walletd/commit/d37afc50b1c7e74a3326f3dcda64cfd41612f988))
+
 ## [1.1.8](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.7...zcash-walletd-v1.1.8) (2026-01-15)
 
 
