@@ -2,7 +2,7 @@ use crate::account::AccountBalance;
 use crate::db::Db;
 use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
 use crate::lwd_rpc::*;
-use crate::scan::{get_latest_height, Decoder, Orchard, Sapling, ScanError};
+use crate::scan::{get_latest_height, Decoder, Decoders, Ironwood, Orchard, Sapling, ScanError};
 use crate::transaction::Transfer;
 use crate::{from_tonic, WalletConfig};
 use anyhow::Result;
@@ -266,19 +266,28 @@ pub async fn request_scan(
         .ok_or(anyhow::anyhow!("Block Hash missing from db"))?;
 
     let nfs = db.get_nfs().await?;
-    let mut sap_dec = ufvk.sapling().map(|fvk| {
+    let sapling = ufvk.sapling().map(|fvk| {
         let nk = fvk.fvk().vk.nk;
         let ivk = fvk.to_ivk(zip32::Scope::External);
         let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
         // TODO: Load nfs
         Decoder::<Sapling>::new(nk, fvk.clone(), pivk, &nfs)
     });
-    let mut orc_dec = ufvk.orchard().map(|fvk| {
+    let orchard = ufvk.orchard().map(|fvk| {
         let ivk = fvk.to_ivk(zip32::Scope::External);
         let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
-        // TODO: Load nfs
         Decoder::<Orchard>::new(fvk.clone(), ivk, pivk, &nfs)
     });
+    let ironwood = ufvk.orchard().map(|fvk| {
+        let ivk = fvk.to_ivk(zip32::Scope::External);
+        let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
+        Decoder::<Ironwood>::new(fvk.clone(), ivk, pivk, &nfs)
+    });
+    let mut decoders = Decoders {
+        sapling,
+        orchard,
+        ironwood,
+    };
 
     let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone())
         .await
@@ -296,8 +305,7 @@ pub async fn request_scan(
         start + 1,
         end,
         &prev_hash,
-        &mut sap_dec,
-        &mut orc_dec,
+        &mut decoders,
     )
     .await;
     match res {
@@ -324,9 +332,7 @@ pub async fn request_scan(
 pub const SAFE_REORG_DISTANCE: u32 = 100u32;
 
 #[post("/reorg")]
-pub async fn reorg(
-    db: &State<Db>,
-) -> Result<(), Debug<anyhow::Error>> {
+pub async fn reorg(db: &State<Db>) -> Result<(), Debug<anyhow::Error>> {
     let synced_height = db.get_synced_height().await?;
     db.truncate_height(synced_height - SAFE_REORG_DISTANCE)
         .await?;

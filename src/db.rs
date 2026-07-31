@@ -24,6 +24,68 @@ pub struct Db {
 }
 
 impl Db {
+    async fn migrate_received_notes_pool(connection: &mut SqliteConnection) -> Result<()> {
+        let has_pool =
+            sqlx::query("SELECT 1 FROM pragma_table_info('received_notes') WHERE name = 'pool'")
+                .fetch_optional(&mut *connection)
+                .await?
+                .is_some();
+
+        if !has_pool {
+            let mut tx = connection.begin().await?;
+            sqlx::query(
+                "CREATE TABLE received_notes_new (
+                id_note INTEGER PRIMARY KEY,
+                address TEXT NOT NULL,
+                account INTEGER,
+                sub_account INTEGER,
+                id_tx INTEGER NOT NULL,
+                pool INTEGER,
+                position INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                diversifier BLOB NOT NULL,
+                value INTEGER NOT NULL,
+                rcm BLOB NOT NULL,
+                nf BLOB NOT NULL UNIQUE,
+                rho BLOB,
+                memo TEXT,
+                spent INTEGER,
+                CONSTRAINT pool_position UNIQUE (pool, position))",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO received_notes_new
+                (id_note, address, account, sub_account, id_tx, pool, position, height,
+                 diversifier, value, rcm, nf, rho, memo, spent)
+                SELECT id_note, address, account, sub_account, id_tx,
+                       CASE WHEN rho IS NULL THEN 1 ELSE 2 END,
+                       position, height, diversifier, value, rcm, nf, rho, memo, spent
+                FROM received_notes",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DROP TABLE received_notes")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("ALTER TABLE received_notes_new RENAME TO received_notes")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+
+        // A rollback to an older binary can create rows without the new column.
+        sqlx::query(
+            "UPDATE received_notes
+             SET pool = CASE WHEN rho IS NULL THEN 1 ELSE 2 END
+             WHERE pool IS NULL",
+        )
+        .execute(&mut *connection)
+        .await?;
+
+        Ok(())
+    }
+
     pub async fn new(
         network: Network,
         db_path: &str,
@@ -44,8 +106,10 @@ impl Db {
     }
 
     async fn cleanup_stale_data(connection: &mut SqliteConnection) -> Result<()> {
-        sqlx::query("DELETE FROM received_notes WHERE height >=
-            (SELECT MAX(height) FROM blocks)")
+        sqlx::query(
+            "DELETE FROM received_notes WHERE height >=
+            (SELECT MAX(height) FROM blocks)",
+        )
         .execute(connection)
         .await?;
         Ok(())
@@ -440,6 +504,7 @@ impl Db {
             account INTEGER,
             sub_account INTEGER,
             id_tx INTEGER NOT NULL,
+            pool INTEGER,
             position INTEGER NOT NULL,
             height INTEGER NOT NULL,
             diversifier BLOB NOT NULL,
@@ -449,11 +514,12 @@ impl Db {
             rho BLOB,
             memo TEXT,
             spent INTEGER,
-            CONSTRAINT tx_output UNIQUE (position))",
+            CONSTRAINT pool_position UNIQUE (pool, position))",
         )
         .execute(&mut *connection)
         .await?;
 
+        Self::migrate_received_notes_pool(&mut connection).await?;
         Self::cleanup_stale_data(&mut connection).await?;
 
         if sqlx::query("SELECT 1 FROM pragma_table_info('received_notes') WHERE name = 'rho'")
@@ -556,14 +622,15 @@ impl Db {
 
                     sqlx::query(
                         "INSERT INTO received_notes
-                        (address, account, sub_account, id_tx, position, height,
+                        (address, account, sub_account, id_tx, pool, position, height,
                         diversifier, value, rcm, nf, rho, memo, spent)
-                        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'',0)",
+                        VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'',0)",
                     )
                     .bind(&received_note.address)
                     .bind(account)
                     .bind(sub_account)
                     .bind(id_tx)
+                    .bind(received_note.pool)
                     .bind(received_note.position)
                     .bind(received_note.height)
                     .bind(received_note.diversifier.as_slice())
@@ -580,12 +647,13 @@ impl Db {
                         .await?;
                 }
                 ScanEvent::Spent(spent_note) => {
-                    let (_, is_new) = self.create_tx_if_not_exists(
-                        spent_note.height,
-                        spent_note.txid.as_slice(),
-                        db_tx,
-                    )
-                    .await?;
+                    let (_, is_new) = self
+                        .create_tx_if_not_exists(
+                            spent_note.height,
+                            spent_note.txid.as_slice(),
+                            db_tx,
+                        )
+                        .await?;
                     if is_new {
                         notify_txids.push(spent_note.txid);
                     }
@@ -661,5 +729,77 @@ impl Db {
 
     pub fn ufvk(&self) -> &UnifiedFullViewingKey {
         &self.ufvk
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::Connection;
+
+    #[tokio::test]
+    async fn received_notes_migration_preserves_rows_and_separates_pool_positions() -> Result<()> {
+        let mut connection = SqliteConnection::connect(":memory:").await?;
+        sqlx::query(
+            "CREATE TABLE received_notes (
+                id_note INTEGER PRIMARY KEY,
+                address TEXT NOT NULL,
+                account INTEGER,
+                sub_account INTEGER,
+                id_tx INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                diversifier BLOB NOT NULL,
+                value INTEGER NOT NULL,
+                rcm BLOB NOT NULL,
+                nf BLOB NOT NULL UNIQUE,
+                rho BLOB,
+                memo TEXT,
+                spent INTEGER,
+                CONSTRAINT tx_output UNIQUE (position))",
+        )
+        .execute(&mut connection)
+        .await?;
+        sqlx::query(
+            "INSERT INTO received_notes
+             (id_note, address, id_tx, position, height, diversifier, value, rcm, nf, rho)
+             VALUES
+             (1, 'sapling', 1, 7, 10, x'01', 1, x'02', x'03', NULL),
+             (2, 'orchard', 2, 8, 11, x'04', 2, x'05', x'06', x'07')",
+        )
+        .execute(&mut connection)
+        .await?;
+
+        Db::migrate_received_notes_pool(&mut connection).await?;
+
+        let rows: Vec<(i64, i64)> =
+            sqlx::query_as("SELECT id_note, pool FROM received_notes ORDER BY id_note")
+                .fetch_all(&mut connection)
+                .await?;
+        assert_eq!(rows, vec![(1, 1), (2, 2)]);
+
+        sqlx::query(
+            "INSERT INTO received_notes
+             (id_note, address, id_tx, pool, position, height, diversifier, value, rcm, nf, rho)
+             VALUES (3, 'ironwood', 3, 3, 7, 12, x'08', 3, x'09', x'0a', x'0b')",
+        )
+        .execute(&mut connection)
+        .await?;
+
+        // An older binary does not populate pool. A subsequent upgraded start backfills it.
+        sqlx::query(
+            "INSERT INTO received_notes
+             (id_note, address, id_tx, position, height, diversifier, value, rcm, nf, rho)
+             VALUES (4, 'sapling-after-rollback', 4, 9, 13, x'0c', 4, x'0d', x'0e', NULL)",
+        )
+        .execute(&mut connection)
+        .await?;
+        Db::migrate_received_notes_pool(&mut connection).await?;
+        let pool: i64 = sqlx::query_scalar("SELECT pool FROM received_notes WHERE id_note = 4")
+            .fetch_one(&mut connection)
+            .await?;
+        assert_eq!(pool, 1);
+
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-`zcash-walletd` is a shielded only (sapling, orchard, UA) REST wallet
+`zcash-walletd` is a shielded-only (Sapling, Orchard, Ironwood, UA) REST wallet
 for zcash.
 
 Primary intended to work with the BTCPayServer payment gateway,
@@ -58,3 +58,10 @@ The latest image is available on DockerHub under `hhanh00/zcash-walletd:latest`
 ## Orchard
 Support for Orchard and UA was added in 1.1.2. You MUST delete the database file
 because the previous schema is not compatible.
+
+## Ironwood
+
+Ironwood scanning requires lightwallet protocol v0.5.0 or newer. On first start,
+the wallet automatically migrates existing note positions to be unique within
+each shielded pool. The migration preserves existing notes and remains readable
+by version 1.1.9 for rollback.
