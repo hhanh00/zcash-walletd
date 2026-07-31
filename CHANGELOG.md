@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.10](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.9...zcash-walletd-v1.1.10) (2026-07-31)
+
+
+### Bug Fixes
+
+* add Ironwood transaction support ([#65](https://github.com/hhanh00/zcash-walletd/issues/65)) ([6af80f1](https://github.com/hhanh00/zcash-walletd/commit/6af80f19080136a189de7b67464e87a0f4d393b3))
+
 ## [1.1.9](https://github.com/hhanh00/zcash-walletd/compare/zcash-walletd-v1.1.8...zcash-walletd-v1.1.9) (2026-06-12)
 
 
