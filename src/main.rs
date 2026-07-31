@@ -50,7 +50,7 @@ use crate::{
     db::Db, lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient, monitor::monitor_task,
 };
 use serde::Deserialize;
-use zcash_client_backend::keys::UnifiedFullViewingKey;
+use zcash_keys::keys::UnifiedFullViewingKey;
 
 #[derive(Deserialize, Debug)]
 pub struct WalletConfig {
@@ -90,14 +90,13 @@ async fn main() -> Result<()> {
     let rocket = rocket::build();
     let mut figment = rocket.figment().clone();
     figment = figment.merge(Env::raw());
-    info!("figment {figment:?}");
     let config = Path::new(&config_path);
     if config.exists() {
         figment = figment.merge(Json::file(config_path));
     }
 
     let config: WalletConfig = figment.extract().unwrap();
-    info!("Config {config:?}");
+    info!("Wallet configuration loaded");
     let network = config.network();
     assert!(config.orchard);
 

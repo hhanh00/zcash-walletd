@@ -4,7 +4,7 @@ use anyhow::Result;
 use orchard::{
     keys::FullViewingKey,
     note::{ExtractedNoteCommitment, Nullifier},
-    note_encryption::{CompactAction, OrchardDomain},
+    note_encryption::{CompactAction, IronwoodDomain, OrchardDomain},
     primitives::redpallas::{Signature, SpendAuth},
     Action, Address,
 };
@@ -35,7 +35,8 @@ use crate::{
         compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
         CompactOrchardAction, CompactSaplingOutput, TxFilter,
     },
-    network::Network, Client, Hash,
+    network::Network,
+    Client, Hash,
 };
 
 pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) -> Result<u32> {
@@ -47,18 +48,26 @@ pub async fn get_latest_height(client: &mut CompactTxStreamerClient<Channel>) ->
     Ok(latest_height as u32)
 }
 
+fn tree_state_height(first_scan_height: u32) -> Result<u32, ScanError> {
+    first_scan_height.checked_sub(1).ok_or_else(|| {
+        ScanError::Other(anyhow::anyhow!(
+            "Cannot scan from height 0 because no preceding tree state exists"
+        ))
+    })
+}
+
 pub async fn scan(
     network: &Network,
     client: &mut Client,
     start: u32,
     end: u32,
     prev_hash: &Hash,
-    sap_dec: &mut Option<Decoder<Sapling>>,
-    orc_dec: &mut Option<Decoder<Orchard>>,
+    decoders: &mut Decoders,
 ) -> Result<Vec<ScanEvent>, ScanError> {
+    let tree_state_height = tree_state_height(start)?;
     let tree_state = client
         .get_tree_state(Request::new(BlockId {
-            height: start as u64,
+            height: tree_state_height as u64,
             hash: vec![],
         }))
         .await
@@ -81,8 +90,9 @@ pub async fn scan(
         .map_err(|e| ScanError::Other(anyhow::Error::new(e)))?
         .into_inner();
     let mut prev_hash = *prev_hash;
-    let mut sap_position = get_tree_size(&tree_state.sapling_tree).unwrap();
-    let mut orc_position = get_tree_size(&tree_state.orchard_tree).unwrap();
+    let mut sap_position = get_tree_size(&tree_state.sapling_tree).map_err(ScanError::Other)?;
+    let mut orc_position = get_tree_size(&tree_state.orchard_tree).map_err(ScanError::Other)?;
+    let mut iron_position = get_tree_size(&tree_state.ironwood_tree).map_err(ScanError::Other)?;
 
     let mut events = vec![];
     let mut new_txids = vec![];
@@ -97,7 +107,7 @@ pub async fn scan(
 
         for vtx in block.vtx.iter() {
             let mut found = false;
-            if let Some(sap_dec) = sap_dec {
+            if let Some(sap_dec) = decoders.sapling.as_mut() {
                 for i in vtx.spends.iter() {
                     let nf: &Hash = i.nf.as_slice().try_into().unwrap();
                     if let Some(value) = sap_dec.nfs.get(nf) {
@@ -125,7 +135,7 @@ pub async fn scan(
                 }
             }
 
-            if let Some(orc_dec) = orc_dec {
+            if let Some(orc_dec) = decoders.orchard.as_mut() {
                 for (vout, a) in vtx.actions.iter().enumerate() {
                     let nf: &Hash = a.nullifier.as_slice().try_into().unwrap();
                     if let Some(value) = orc_dec.nfs.get(nf) {
@@ -150,6 +160,31 @@ pub async fn scan(
                 }
             }
 
+            if let Some(iron_dec) = decoders.ironwood.as_mut() {
+                for (vout, a) in vtx.ironwood_actions.iter().enumerate() {
+                    let nf: &Hash = a.nullifier.as_slice().try_into().unwrap();
+                    if let Some(value) = iron_dec.nfs.get(nf) {
+                        events.push(ScanEvent::Spent(SpentNote {
+                            height,
+                            nf: *nf,
+                            txid: vtx.hash.clone().try_into().unwrap(),
+                            value: *value,
+                        }));
+                    }
+                    if let Some(n) = iron_dec.try_compact_note_decryption(
+                        network,
+                        height,
+                        &vtx.hash,
+                        iron_position + vout as u32,
+                        a,
+                    )? {
+                        iron_dec.add_nf(n.nf, n.value);
+                        events.push(ScanEvent::Received(n));
+                        found = true;
+                    }
+                }
+            }
+
             if found {
                 let txid: Hash = vtx.hash.clone().try_into().unwrap();
                 new_txids.push(WalletTx {
@@ -157,16 +192,18 @@ pub async fn scan(
                     txid,
                     sap_position,
                     orc_position,
+                    iron_position,
                 });
             }
 
             sap_position += vtx.outputs.len() as u32;
             orc_position += vtx.actions.len() as u32;
+            iron_position += vtx.ironwood_actions.len() as u32;
         }
     }
 
     for wtx in new_txids.iter() {
-        let memos = scan_tx(network, client, wtx, sap_dec, orc_dec).await?;
+        let memos = scan_tx(network, client, wtx, decoders).await?;
         for m in memos {
             events.push(ScanEvent::Memo(m));
         }
@@ -180,8 +217,7 @@ pub async fn scan_tx(
     network: &Network,
     client: &mut Client,
     wtx: &WalletTx,
-    sap_dec: &Option<Decoder<Sapling>>,
-    orc_dec: &Option<Decoder<Orchard>>,
+    decoders: &Decoders,
 ) -> Result<Vec<MemoNote>> {
     let mut notes = vec![];
     let raw_tx = client
@@ -195,7 +231,7 @@ pub async fn scan_tx(
     let tx = Transaction::read(&*raw_tx.data, branch_id)?;
     let tx = tx.into_data();
 
-    if let Some(sap_dec) = sap_dec {
+    if let Some(sap_dec) = decoders.sapling.as_ref() {
         if let Some(sapling_bundle) = tx.sapling_bundle() {
             for (vout, o) in sapling_bundle.shielded_outputs().iter().enumerate() {
                 if let Some(note) =
@@ -206,11 +242,22 @@ pub async fn scan_tx(
             }
         }
     }
-    if let Some(orc_dec) = orc_dec {
+    if let Some(orc_dec) = decoders.orchard.as_ref() {
         if let Some(orchard_bundle) = tx.orchard_bundle() {
             for (vout, a) in orchard_bundle.actions().iter().enumerate() {
                 if let Some(note) =
                     orc_dec.try_note_decryption(vout as u32 + wtx.orc_position, a)?
+                {
+                    notes.push(note);
+                }
+            }
+        }
+    }
+    if let Some(iron_dec) = decoders.ironwood.as_ref() {
+        if let Some(ironwood_bundle) = tx.ironwood_bundle() {
+            for (vout, a) in ironwood_bundle.actions().iter().enumerate() {
+                if let Some(note) =
+                    iron_dec.try_note_decryption(vout as u32 + wtx.iron_position, a)?
                 {
                     notes.push(note);
                 }
@@ -307,6 +354,12 @@ pub struct Decoder<P: Pool> {
     pub nfs: HashMap<Hash, u64>,
 }
 
+pub struct Decoders {
+    pub sapling: Option<Decoder<Sapling>>,
+    pub orchard: Option<Decoder<Orchard>>,
+    pub ironwood: Option<Decoder<Ironwood>>,
+}
+
 impl<P: Pool> Decoder<P> {
     pub fn new(
         nk: P::NullifierKey,
@@ -398,6 +451,88 @@ impl Pool for Orchard {
     type PreparedIncomingViewingKey = orchard::keys::PreparedIncomingViewingKey;
     type CompactOutput = CompactOrchardAction;
     type Output = Action<Signature<SpendAuth>>;
+}
+
+pub struct Ironwood;
+
+impl Pool for Ironwood {
+    type Address = Address;
+    type NullifierKey = FullViewingKey;
+    type DiversifierKey = orchard::keys::IncomingViewingKey;
+    type PreparedIncomingViewingKey = orchard::keys::PreparedIncomingViewingKey;
+    type CompactOutput = CompactOrchardAction;
+    type Output = Action<Signature<SpendAuth>>;
+}
+
+impl Decode<Ironwood> for Decoder<Ironwood> {
+    fn try_compact_note_decryption(
+        &self,
+        network: &Network,
+        height: u32,
+        txid: &[u8],
+        position: u32,
+        action: &CompactOrchardAction,
+    ) -> Result<Option<ReceivedNote>> {
+        let epk: &[u8; 32] = action.ephemeral_key.as_slice().try_into().unwrap();
+        let ca = CompactAction::from_parts(
+            Nullifier::from_bytes(action.nullifier.as_slice().try_into().unwrap()).unwrap(),
+            ExtractedNoteCommitment::from_bytes(action.cmx.as_slice().try_into().unwrap()).unwrap(),
+            EphemeralKeyBytes(*epk),
+            action.ciphertext.as_slice().try_into().unwrap(),
+        );
+        let domain = IronwoodDomain::for_compact_action(&ca);
+        if let Some((note, address)) = try_compact_note_decryption(&domain, &self.pivk, &ca) {
+            let ua = unified::Receiver::Orchard(address.to_raw_address_bytes());
+            let ua = unified::Address::try_from_items(vec![ua])?;
+            let ua = ua.encode(&network.network_type());
+            let diversifier = *address.diversifier().as_array();
+            let value = note.value().inner();
+            let rcm = *note.rseed().as_bytes();
+            let nf = note.nullifier(&self.nk);
+            let rho = note.rho().to_bytes();
+            let di = self.decrypt_diversifier(&address)?;
+
+            return Ok(Some(ReceivedNote {
+                txid: txid.try_into().unwrap(),
+                pool: 3,
+                position,
+                height,
+                address: ua,
+                diversifier,
+                diversifier_index: di,
+                value,
+                rcm,
+                nf: nf.to_bytes(),
+                rho: Some(rho),
+            }));
+        }
+        Ok(None)
+    }
+
+    fn try_note_decryption(
+        &self,
+        _position: u32,
+        action: &Action<Signature<SpendAuth>>,
+    ) -> Result<Option<MemoNote>> {
+        let domain = IronwoodDomain::for_action(action);
+        if let Some((note, _address, memo_bytes)) = try_note_decryption(&domain, &self.pivk, action)
+        {
+            let nf = note.nullifier(&self.nk);
+            return Ok(Some(MemoNote {
+                nf: nf.to_bytes(),
+                memo: memo_text(&memo_bytes)?,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn decrypt_diversifier(&self, address: &Address) -> Result<Option<u64>> {
+        if let Some(di) = self.dk.diversifier_index(address) {
+            let di: u64 = di.try_into()?;
+            return Ok(Some(di));
+        }
+        Ok(None)
+    }
 }
 
 impl Decode<Orchard> for Decoder<Orchard> {
@@ -519,6 +654,7 @@ pub struct WalletTx {
     pub txid: Hash,
     pub sap_position: u32,
     pub orc_position: u32,
+    pub iron_position: u32,
 }
 
 pub fn memo_text(memo_bytes: &[u8]) -> Result<String> {
@@ -549,7 +685,141 @@ mod tests {
 
     const FVK: &str = "uview1s5ranpd74zd2pseylw0fmt0cnudf9765mwjjd9mqf8tvjq2nlw9vgypzqayfvs7aeedguwl4r7exz50nrw6llfs3n9xfd4sm2slaay7smysc4yjyuwu3z7n5ccvyw70qkw28yt6xwra6c8d20ewpjeqq4enmftyly3fmn78hwwkyffp2y4x2vk8050vcly8y5fuse5s9e5j4wmwuldemxahrp4zrgatj63mnpqlpacvcudqfsm5ee29pj8lr5wt93eyrx3fwa64m6505cge6n46c7eqw59e0n3m9rmsntcflfmu9wyjgfk2pmjf4npkml93vyq0fps2rh4mdwpz4ld059m6mamjht99j7sdypwx52lj6lvrfgwja4uf7qy2g8d6gkmvkh7u4dksq5gazxvye4gtwfgwmuygg2sqmkkf4fjd3ymf0mq99rhf0trsl0lpddw64r4n7jj7mxy6fcpj64vkx0pre2lla9p8nknrt2c33zy3vaczd";
 
+    #[test]
+    fn scan_uses_tree_state_from_preceding_block() {
+        assert_eq!(tree_state_height(42).unwrap(), 41);
+        assert!(tree_state_height(0).is_err());
+    }
+
+    #[test]
+    fn ironwood_decoder_detects_v3_note_only_in_ironwood_pool() -> Result<()> {
+        use orchard::{
+            keys::{Scope, SpendingKey},
+            note::{Note, NoteVersion, RandomSeed, Rho},
+            note_encryption::IronwoodNoteEncryption,
+            value::NoteValue,
+        };
+        use rand_core::{OsRng, RngCore};
+        use zcash_note_encryption::Domain;
+
+        let mut rng = OsRng;
+        let spending_key: SpendingKey = loop {
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            let key: Option<SpendingKey> = SpendingKey::from_bytes(bytes).into();
+            if let Some(key) = key {
+                break key;
+            }
+        };
+        let fvk = FullViewingKey::from(&spending_key);
+        let ivk = fvk.to_ivk(Scope::External);
+        let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
+        let recipient = fvk.address_at(0u32, Scope::External);
+
+        let nf_old: Nullifier = loop {
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            let nf: Option<Nullifier> = Nullifier::from_bytes(&bytes).into();
+            if let Some(nf) = nf {
+                break nf;
+            }
+        };
+        let rho = Rho::from_bytes(&nf_old.to_bytes()).unwrap();
+        let note: Note = loop {
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            let rseed: Option<RandomSeed> = RandomSeed::from_bytes(bytes, &rho).into();
+            if let Some(rseed) = rseed {
+                let note: Option<Note> = Note::from_parts(
+                    recipient,
+                    NoteValue::from_raw(123_456),
+                    rho,
+                    rseed,
+                    NoteVersion::V3,
+                )
+                .into();
+                if let Some(note) = note {
+                    break note;
+                }
+            }
+        };
+        let cmx = ExtractedNoteCommitment::from(note.commitment());
+        let encryptor =
+            IronwoodNoteEncryption::new(Some(fvk.to_ovk(Scope::External)), note, [0u8; 512]);
+        let ephemeral_key = IronwoodDomain::epk_bytes(encryptor.epk());
+        let ciphertext = encryptor.encrypt_note_plaintext();
+        let action = CompactOrchardAction {
+            nullifier: nf_old.to_bytes().to_vec(),
+            cmx: cmx.to_bytes().to_vec(),
+            ephemeral_key: ephemeral_key.0.to_vec(),
+            ciphertext: ciphertext[..52].to_vec(),
+        };
+
+        let ironwood_decoder =
+            Decoder::<Ironwood>::new(fvk.clone(), ivk.clone(), pivk.clone(), &HashMap::new());
+        let received = ironwood_decoder
+            .try_compact_note_decryption(&Network::Main, 1, &[0u8; 32], 0, &action)?
+            .expect("Ironwood note should decrypt");
+        assert_eq!(received.pool, 3);
+        assert_eq!(received.value, 123_456);
+
+        let orchard_decoder = Decoder::<Orchard>::new(fvk, ivk, pivk, &HashMap::new());
+        assert!(orchard_decoder
+            .try_compact_note_decryption(&Network::Main, 1, &[0u8; 32], 0, &action)?
+            .is_none());
+
+        Ok(())
+    }
+
     #[tokio::test]
+    #[ignore]
+    async fn parses_known_ironwood_transaction() -> Result<()> {
+        let mut client = CompactTxStreamerClient::connect("https://zec.rocks".to_string()).await?;
+        let mut txid =
+            hex::decode("c0b15e3d1e02ecc8881b032f1088e8a6dbba2606e9e4760d8a5f6e6a5ff381e4")?;
+        txid.reverse();
+        let protocol_txid = txid.clone();
+        let raw_tx = client
+            .get_transaction(Request::new(TxFilter {
+                hash: txid,
+                ..TxFilter::default()
+            }))
+            .await?
+            .into_inner();
+
+        let height = raw_tx.height as u32;
+        let branch_id = BranchId::for_height(&Network::Main, BlockHeight::from_u32(height));
+        assert_eq!(branch_id, BranchId::Nu6_3);
+        let tx = Transaction::read(&*raw_tx.data, branch_id)?.into_data();
+        assert!(tx.ironwood_bundle().is_some());
+
+        let block = client
+            .get_block(Request::new(BlockId {
+                height: height.into(),
+                hash: vec![],
+            }))
+            .await?
+            .into_inner();
+        let compact_tx = block
+            .vtx
+            .iter()
+            .find(|tx| tx.hash == protocol_txid)
+            .expect("known transaction should be in its compact block");
+        assert!(!compact_tx.ironwood_actions.is_empty());
+
+        let tree_state = client
+            .get_tree_state(Request::new(BlockId {
+                height: (height - 1).into(),
+                hash: vec![],
+            }))
+            .await?
+            .into_inner();
+        assert!(!tree_state.ironwood_tree.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
     async fn test() -> Result<()> {
         let mut client = CompactTxStreamerClient::connect("https://zec.rocks".to_string()).await?;
 
@@ -557,26 +827,35 @@ mod tests {
             hex::decode("5f03d35ae940bb840564c3b7af7ab72255096d3eca15c910c0e40d0000000000")
                 .unwrap();
         let ufvk = zcash_keys::keys::UnifiedFullViewingKey::decode(&Network::Main, FVK).unwrap();
-        let mut sap_dec = ufvk.sapling().map(|fvk| {
+        let sapling = ufvk.sapling().map(|fvk| {
             let nk = fvk.fvk().vk.nk;
             let ivk = fvk.to_ivk(zip32::Scope::External);
             let pivk = sapling_crypto::keys::PreparedIncomingViewingKey::new(&ivk);
             Decoder::<Sapling>::new(nk, fvk.clone(), pivk, &HashMap::new())
         });
-        let mut orc_dec = ufvk.orchard().map(|fvk| {
+        let orchard = ufvk.orchard().map(|fvk| {
             let ivk = fvk.to_ivk(zip32::Scope::External);
             let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
             Decoder::<Orchard>::new(fvk.clone(), ivk, pivk, &HashMap::new())
         });
+        let ironwood = ufvk.orchard().map(|fvk| {
+            let ivk = fvk.to_ivk(zip32::Scope::External);
+            let pivk = orchard::keys::PreparedIncomingViewingKey::new(&ivk);
+            Decoder::<Ironwood>::new(fvk.clone(), ivk, pivk, &HashMap::new())
+        });
 
+        let mut decoders = Decoders {
+            sapling,
+            orchard,
+            ironwood,
+        };
         let events = scan(
             &Network::Main,
             &mut client,
             2_890_000,
             2_900_000,
             &prev_hash.try_into().unwrap(),
-            &mut sap_dec,
-            &mut orc_dec,
+            &mut decoders,
         )
         .await?;
 

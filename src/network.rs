@@ -38,4 +38,5 @@ pub const REGTEST: LocalNetwork = LocalNetwork {
     nu6: Some(BlockHeight::from_u32(1)),
     nu6_1: Some(BlockHeight::from_u32(1)),
     nu6_2: Some(BlockHeight::from_u32(1)),
+    nu6_3: Some(BlockHeight::from_u32(1)),
 };

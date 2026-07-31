@@ -1,3 +1,12 @@
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ChainMetadata {
+    #[prost(uint32, tag = "1")]
+    pub sapling_commitment_tree_size: u32,
+    #[prost(uint32, tag = "2")]
+    pub orchard_commitment_tree_size: u32,
+    #[prost(uint32, tag = "3")]
+    pub ironwood_commitment_tree_size: u32,
+}
 /// CompactBlock is a packaging of ONLY the data from a block that's needed to:
 ///   1. Detect a payment to your shielded Sapling address
 ///   2. Detect a spend of your shielded Sapling notes
@@ -25,6 +34,8 @@ pub struct CompactBlock {
     /// zero or more compact transactions from this block
     #[prost(message, repeated, tag = "7")]
     pub vtx: ::prost::alloc::vec::Vec<CompactTx>,
+    #[prost(message, optional, tag = "8")]
+    pub chain_metadata: ::core::option::Option<ChainMetadata>,
 }
 /// CompactTx contains the minimum information for a wallet to know if this transaction
 /// is relevant to it (either pays to it or spends from it) via shielded elements
@@ -52,6 +63,8 @@ pub struct CompactTx {
     pub outputs: ::prost::alloc::vec::Vec<CompactSaplingOutput>,
     #[prost(message, repeated, tag = "6")]
     pub actions: ::prost::alloc::vec::Vec<CompactOrchardAction>,
+    #[prost(message, repeated, tag = "9")]
+    pub ironwood_actions: ::prost::alloc::vec::Vec<CompactOrchardAction>,
 }
 /// CompactSaplingSpend is a Sapling Spend Description as described in 7.3 of the Zcash
 /// protocol specification.
@@ -266,6 +279,9 @@ pub struct TreeState {
     /// orchard commitment tree state
     #[prost(string, tag = "6")]
     pub orchard_tree: ::prost::alloc::string::String,
+    /// ironwood commitment tree state
+    #[prost(string, tag = "7")]
+    pub ironwood_tree: ::prost::alloc::string::String,
 }
 /// Results are sorted by height, which makes it easy to issue another
 /// request that picks up from where the previous left off.

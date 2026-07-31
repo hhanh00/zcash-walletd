@@ -39,7 +39,7 @@ bls12_381 = "0.8"
 jubjub = "0.10"
 ff = "0.13"
 group = "0.13"
-orchard = "0.14.0"
+orchard = "0.15.4"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 
@@ -49,19 +49,16 @@ sapling-crypto = "0.7"
 zcash_note_encryption = "0.4.1"
 zip32 = "0.2"
 
-zcash_client_backend = { version = "0.23", features = [
-    "lightwalletd-tonic-tls-webpki-roots",
-    "orchard",
-    "transparent-inputs",
-] }
-zcash_keys = { version = "0.14", features = ["orchard", "sapling"] }
-zcash_protocol = { version = "0.9", features = ["local-consensus"] }
-zcash_address = { version = "0.12" }
-zcash_primitives = "0.28"
-zcash_proofs = "0.28"
+zcash_keys = { version = "0.16.1", features = ["orchard", "sapling"] }
+zcash_protocol = { version = "0.10.3", features = ["local-consensus"] }
+zcash_address = "0.13"
+zcash_primitives = "0.30"
 
 [build-dependencies]
 tonic-build = "0.4.2"
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 # [dependencies.zcash_client_backend]
 # #git = "https://github.com/zcash/librustzcash.git"
