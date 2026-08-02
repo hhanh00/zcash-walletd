@@ -4,8 +4,8 @@ use crate::lwd_rpc::compact_tx_streamer_client::CompactTxStreamerClient;
 use crate::lwd_rpc::*;
 use crate::scan::{get_latest_height, Decoder, Decoders, Ironwood, Orchard, Sapling, ScanError};
 use crate::transaction::Transfer;
-use crate::{from_tonic, WalletConfig};
-use anyhow::Result;
+use crate::{from_tonic, Client, Hash, WalletConfig};
+use anyhow::{anyhow, Result};
 use rocket::response::Debug;
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::State;
@@ -313,11 +313,7 @@ pub async fn request_scan(
         // Rewind if we hit a chain reorg but don't error
         {
             match error {
-                ScanError::Reorganization => {
-                    let synced_height = db.get_synced_height().await?;
-                    db.truncate_height(synced_height - SAFE_REORG_DISTANCE)
-                        .await
-                }
+                ScanError::Reorganization => rewind_after_reorg(db, &mut client).await,
                 ScanError::Other(error) => Err(error),
             }?
         }
@@ -331,11 +327,47 @@ pub async fn request_scan(
 
 pub const SAFE_REORG_DISTANCE: u32 = 100u32;
 
-#[post("/reorg")]
-pub async fn reorg(db: &State<Db>) -> Result<(), Debug<anyhow::Error>> {
+fn reorg_heights(synced_height: u32) -> Result<(u32, u32)> {
+    let rescan_height = synced_height
+        .checked_sub(SAFE_REORG_DISTANCE)
+        .ok_or_else(|| anyhow::anyhow!("Synced height is below the reorg safety distance"))?;
+    let checkpoint_height = rescan_height
+        .checked_sub(1)
+        .ok_or_else(|| anyhow::anyhow!("No checkpoint exists before the reorg rescan height"))?;
+    Ok((rescan_height, checkpoint_height))
+}
+
+async fn rewind_after_reorg(db: &Db, client: &mut Client) -> Result<()> {
     let synced_height = db.get_synced_height().await?;
-    db.truncate_height(synced_height - SAFE_REORG_DISTANCE)
+    let (rescan_height, checkpoint_height) = reorg_heights(synced_height)?;
+
+    // Fetch first so a lightwalletd failure cannot leave the wallet half-rewound.
+    let checkpoint = client
+        .get_block(Request::new(BlockId {
+            height: checkpoint_height as u64,
+            hash: vec![],
+        }))
+        .await?
+        .into_inner();
+    let checkpoint_hash: Hash = checkpoint
+        .hash
+        .try_into()
+        .map_err(|_| anyhow!("Invalid checkpoint hash returned by lightwalletd"))?;
+
+    db.rewind_with_checkpoint(rescan_height, checkpoint_height, &checkpoint_hash)
         .await?;
+    Ok(())
+}
+
+#[post("/reorg")]
+pub async fn reorg(
+    db: &State<Db>,
+    config: &State<WalletConfig>,
+) -> Result<(), Debug<anyhow::Error>> {
+    let mut client = CompactTxStreamerClient::connect(config.lwd_url.clone())
+        .await
+        .map_err(anyhow::Error::new)?;
+    rewind_after_reorg(db, &mut client).await?;
     Ok(())
 }
 
@@ -358,4 +390,20 @@ pub async fn notify_tx(txid: &[u8], notify_tx_url: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reorg_rewinds_from_a_fresh_preceding_checkpoint() {
+        assert_eq!(reorg_heights(3_431_523).unwrap(), (3_431_423, 3_431_422));
+    }
+
+    #[test]
+    fn reorg_rejects_heights_without_a_preceding_checkpoint() {
+        assert!(reorg_heights(SAFE_REORG_DISTANCE).is_err());
+        assert!(reorg_heights(SAFE_REORG_DISTANCE - 1).is_err());
+    }
 }

@@ -106,12 +106,20 @@ impl Db {
     }
 
     async fn cleanup_stale_data(connection: &mut SqliteConnection) -> Result<()> {
+        let mut tx = connection.begin().await?;
         sqlx::query(
-            "DELETE FROM received_notes WHERE height >=
+            "DELETE FROM received_notes WHERE height >
             (SELECT MAX(height) FROM blocks)",
         )
-        .execute(connection)
+        .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "DELETE FROM transactions WHERE height >
+            (SELECT MAX(height) FROM blocks)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -368,27 +376,53 @@ impl Db {
         Ok(transfers)
     }
 
-    pub async fn truncate_height(&self, height: u32) -> Result<()> {
-        let mut connection = self.pool.acquire().await?;
+    async fn rewind_with_checkpoint_on_connection(
+        connection: &mut SqliteConnection,
+        rescan_height: u32,
+        checkpoint_height: u32,
+        checkpoint_hash: &Hash,
+    ) -> Result<()> {
+        let mut tx = connection.begin().await?;
 
-        sqlx::query("DELETE FROM transactions WHERE height >= ?1")
-            .bind(height)
-            .execute(&mut *connection)
-            .await?;
         sqlx::query("DELETE FROM received_notes WHERE height >= ?1")
-            .bind(height)
-            .execute(&mut *connection)
+            .bind(rescan_height)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM transactions WHERE height >= ?1")
+            .bind(rescan_height)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM blocks WHERE height >= ?1")
-            .bind(height)
-            .execute(&mut *connection)
+            .bind(rescan_height)
+            .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE received_notes SET spent = NULL WHERE spent >= ?1")
-            .bind(height)
-            .execute(&mut *connection)
-            .await?;
+        sqlx::query(
+            "INSERT INTO blocks(hash, height) VALUES (?1, ?2)
+             ON CONFLICT(height) DO UPDATE SET hash = excluded.hash",
+        )
+        .bind(checkpoint_hash.as_slice())
+        .bind(checkpoint_height)
+        .execute(&mut *tx)
+        .await?;
 
+        tx.commit().await?;
         Ok(())
+    }
+
+    pub async fn rewind_with_checkpoint(
+        &self,
+        rescan_height: u32,
+        checkpoint_height: u32,
+        checkpoint_hash: &Hash,
+    ) -> Result<()> {
+        let mut connection = self.pool.acquire().await?;
+        Self::rewind_with_checkpoint_on_connection(
+            &mut connection,
+            rescan_height,
+            checkpoint_height,
+            checkpoint_hash,
+        )
+        .await
     }
 
     pub async fn fetch_block_hash(&self, client: &mut Client, height: u32) -> Result<()> {
@@ -799,6 +833,106 @@ mod tests {
             .fetch_one(&mut connection)
             .await?;
         assert_eq!(pool, 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reorg_rewind_inserts_checkpoint_when_blocks_are_sparse() -> Result<()> {
+        let mut connection = SqliteConnection::connect(":memory:").await?;
+        sqlx::query("CREATE TABLE blocks (height INTEGER PRIMARY KEY, hash BLOB NOT NULL)")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("CREATE TABLE transactions (height INTEGER NOT NULL)")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("CREATE TABLE received_notes (height INTEGER NOT NULL)")
+            .execute(&mut connection)
+            .await?;
+
+        sqlx::query(
+            "INSERT INTO blocks(height, hash) VALUES
+             (3429138, zeroblob(32)),
+             (3431523, zeroblob(32))",
+        )
+        .execute(&mut connection)
+        .await?;
+        sqlx::query("INSERT INTO transactions(height) VALUES (3431400), (3431500)")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("INSERT INTO received_notes(height) VALUES (3431400), (3431500)")
+            .execute(&mut connection)
+            .await?;
+
+        let checkpoint_hash = [0x42; 32];
+        Db::rewind_with_checkpoint_on_connection(
+            &mut connection,
+            3_431_423,
+            3_431_422,
+            &checkpoint_hash,
+        )
+        .await?;
+
+        let max_height: i64 = sqlx::query_scalar("SELECT MAX(height) FROM blocks")
+            .fetch_one(&mut connection)
+            .await?;
+        let stored_hash: Vec<u8> =
+            sqlx::query_scalar("SELECT hash FROM blocks WHERE height = 3431422")
+                .fetch_one(&mut connection)
+                .await?;
+        let transaction_heights: Vec<i64> =
+            sqlx::query_scalar("SELECT height FROM transactions ORDER BY height")
+                .fetch_all(&mut connection)
+                .await?;
+        let note_heights: Vec<i64> =
+            sqlx::query_scalar("SELECT height FROM received_notes ORDER BY height")
+                .fetch_all(&mut connection)
+                .await?;
+
+        assert_eq!(max_height, 3_431_422);
+        assert_eq!(stored_hash, checkpoint_hash);
+        assert_eq!(transaction_heights, vec![3_431_400]);
+        assert_eq!(note_heights, vec![3_431_400]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_cleanup_preserves_checkpoint_and_replays_newer_transactions() -> Result<()> {
+        let mut connection = SqliteConnection::connect(":memory:").await?;
+        sqlx::query("CREATE TABLE blocks (height INTEGER PRIMARY KEY)")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("CREATE TABLE transactions (height INTEGER NOT NULL)")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("CREATE TABLE received_notes (height INTEGER NOT NULL)")
+            .execute(&mut connection)
+            .await?;
+
+        sqlx::query("INSERT INTO blocks(height) VALUES (3429138)")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("INSERT INTO transactions(height) VALUES (3429138), (3430973)")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("INSERT INTO received_notes(height) VALUES (3429138), (3430973)")
+            .execute(&mut connection)
+            .await?;
+
+        Db::cleanup_stale_data(&mut connection).await?;
+
+        let transaction_heights: Vec<i64> =
+            sqlx::query_scalar("SELECT height FROM transactions ORDER BY height")
+                .fetch_all(&mut connection)
+                .await?;
+        let note_heights: Vec<i64> =
+            sqlx::query_scalar("SELECT height FROM received_notes ORDER BY height")
+                .fetch_all(&mut connection)
+                .await?;
+
+        assert_eq!(transaction_heights, vec![3_429_138]);
+        assert_eq!(note_heights, vec![3_429_138]);
 
         Ok(())
     }
